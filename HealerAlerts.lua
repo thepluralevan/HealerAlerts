@@ -168,7 +168,7 @@ end
 -- ============================================================
 local ANTS_N     = 12     -- segment count
 local ANTS_SZ    = 3      -- px side of each square
-local ANTS_CYCLE = 0.75   -- seconds per full orbit
+local ANTS_CYCLE = 3.75   -- seconds per full orbit (5× the original 0.75s)
 
 local function Ants_Build(parent)
     local segs = {}

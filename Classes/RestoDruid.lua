@@ -34,6 +34,12 @@ local SPELL_ABUNDANCE  = 207383
 -- How many seconds before Lifebloom expiry we start showing the alert
 local LB_WARN_THRESHOLD = 4.5
 
+-- Maximum GCD duration in seconds (base 1.5s; with haste minimum is 0.75s).
+-- Any cooldown with duration <= this threshold is treated as "GCD only" and
+-- does NOT count as a real cooldown — the spell is still considered ready.
+-- Using 1.6 gives a small float buffer above the 1.5s max.
+local GCD_THRESHOLD = 1.6
+
 -- ============================================================
 -- HELPERS
 -- ============================================================
@@ -46,11 +52,16 @@ local function GetCD(spellID)
     return C_Spell.GetSpellCooldown(spellID)
 end
 
--- Returns true if the spell is ready (no active cooldown)
+-- Returns true if the spell is ready (no real cooldown active).
+-- A startTime > 0 with duration <= GCD_THRESHOLD means the spell is only
+-- sitting on the Global Cooldown, not an actual spell cooldown — treat it
+-- as ready so GCD-triggered SPELL_UPDATE_COOLDOWN events don't flash icons.
 local function CDIsReady(cdInfo)
     if not cdInfo then return false end
-    -- startTime == 0 means not on cooldown; also must be enabled
-    return cdInfo.isEnabled and (cdInfo.startTime == 0 or cdInfo.startTime == nil)
+    if not cdInfo.isEnabled then return false end
+    if cdInfo.startTime == 0 or cdInfo.startTime == nil then return true end
+    -- GCD-only: real cooldown has not started
+    return (cdInfo.duration or 0) <= GCD_THRESHOLD
 end
 
 -- ============================================================
@@ -120,9 +131,11 @@ local lifeblosomDef = {
 local function SM_Check()
     local cd    = GetCD(SPELL_SWIFTMEND)
     local ready = CDIsReady(cd)
-    local start = cd and cd.startTime  or 0
-    local dur   = cd and cd.duration   or 0
-    local mod   = cd and cd.modRate    or 1
+    -- Clear the sweep when the spell is ready (includes GCD-only state) so a
+    -- brief GCD duration never flickers as a cooldown animation on a ready icon.
+    local start = (not ready and cd) and cd.startTime or 0
+    local dur   = (not ready and cd) and cd.duration  or 0
+    local mod   = cd and cd.modRate or 1
     HA:HandleCooldownChange("swiftmend", ready, start, dur, mod)
 end
 
@@ -146,9 +159,9 @@ local swiftmendDef = {
 local function WG_Check()
     local cd    = GetCD(SPELL_WILDGROWTH)
     local ready = CDIsReady(cd)
-    local start = cd and cd.startTime or 0
-    local dur   = cd and cd.duration  or 0
-    local mod   = cd and cd.modRate   or 1
+    local start = (not ready and cd) and cd.startTime or 0
+    local dur   = (not ready and cd) and cd.duration  or 0
+    local mod   = cd and cd.modRate or 1
     HA:HandleCooldownChange("wildgrowth", ready, start, dur, mod)
 end
 
