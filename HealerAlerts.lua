@@ -91,9 +91,18 @@ local function MakeDragHandle(frame, xKey, yKey, displayName)
     end)
     frame:SetScript("OnMouseUp", function(self)
         self:StopMovingOrSizing()
-        local _, _, _, x, y = self:GetPoint(1)
-        DB()[xKey] = math.floor(x + 0.5)
-        DB()[yKey] = math.floor(y + 0.5)
+        -- GetPoint(1) is unreliable here: StartMoving() re-anchors the frame
+        -- internally (often to TOPLEFT of UIParent rather than BOTTOMLEFT), so
+        -- the x/y offsets it returns no longer correspond to our stored anchor
+        -- convention.  GetLeft()/GetBottom() always give absolute screen-space
+        -- coordinates which equal the BOTTOMLEFT-of-UIParent offsets we want
+        -- (UIParent origin is always 0,0).
+        local x = self:GetLeft()
+        local y = self:GetBottom()
+        if x and y then
+            DB()[xKey] = math.floor(x + 0.5)
+            DB()[yKey] = math.floor(y + 0.5)
+        end
     end)
 
     bg:Hide(); lbl:Hide()
@@ -106,9 +115,33 @@ local textBG, textLbl = MakeDragHandle(textAnchor, "textAnchorX", "textAnchorY",
 local function ApplyLockState()
     local il = DB().iconLocked
     local tl = DB().textLocked
+
+    -- Resize iconAnchor to cover the full icon bar so the drag handle has a
+    -- usable hit area.  (It was created 1×1 and never resized, making the
+    -- green indicator invisible and the frame essentially un-clickable.)
+    local iconCount = 0
+    for _ in pairs(HA.iconFrames) do iconCount = iconCount + 1 end
+    local sz   = DB().iconSize
+    local step = sz + 4
+    local ext  = iconCount > 0 and (iconCount * step - 4) or sz
+    local dir  = DB().growDirection or "RIGHT"
+    if dir == "RIGHT" or dir == "LEFT" then
+        iconAnchor:SetSize(ext, sz)
+    else
+        iconAnchor:SetSize(sz, ext)
+    end
+
+    -- Icon anchor receives mouse when UNLOCKED; icon buttons receive mouse
+    -- when LOCKED (for tooltips).  Buttons are children of iconAnchor and
+    -- would otherwise intercept every click, preventing the anchor's
+    -- OnMouseDown from ever firing while icons are visible.
     iconAnchor:EnableMouse(not il)
+    for _, btn in pairs(HA.iconFrames) do
+        btn:EnableMouse(il)
+    end
     if il then iconBG:Hide();  iconLbl:Hide()
     else       iconBG:Show();  iconLbl:Show() end
+
     textAnchor:EnableMouse(not tl)
     if tl then textBG:Hide();  textLbl:Hide()
     else       textBG:Show();  textLbl:Show() end
@@ -280,6 +313,15 @@ local function LayoutIcons()
         end
     end
     table.sort(ordered, function(a, b) return a.order < b.order end)
+
+    -- Keep iconAnchor sized to the full bar so the drag handle stays usable.
+    local n   = #ordered
+    local ext = n > 0 and (n * step - 4) or size
+    if dir == "RIGHT" or dir == "LEFT" then
+        iconAnchor:SetSize(ext, size)
+    else
+        iconAnchor:SetSize(size, ext)
+    end
 
     for i, entry in ipairs(ordered) do
         local btn    = HA.iconFrames[entry.key]
