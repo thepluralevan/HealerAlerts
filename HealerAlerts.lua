@@ -216,7 +216,12 @@ local function Ants_Hide(ants) ants.active = false; for _, t in ipairs(ants.segs
 -- SOUND
 -- ============================================================
 local function TryPlaySound(key)
-    local snd = AlertCfg(key).sound
+    -- User-configured sound takes priority; fall back to the alert def's
+    -- defaultSound so sounds work out of the box without any config panel setup.
+    local cfg = AlertCfg(key)
+    local state = HA.alerts[key]
+    local snd = (cfg.sound and cfg.sound ~= "" and cfg.sound)
+             or (state and state.def.defaultSound)
     if snd and snd ~= "" then
         PlaySoundFile("Interface\\AddOns\\HealerAlerts\\Sounds\\" .. snd, "Master")
     end
@@ -498,6 +503,13 @@ function HA:SetBigCount(key, count, r, g, b)
     else
         btn._bigCount:Hide()
     end
+end
+
+-- Expose TryPlaySound publicly for alerts that manage their own sound timing
+-- (e.g. always-visible trackers that need to fire on a state transition rather
+-- than on ActivateAlert).
+function HA:PlayAlertSound(key)
+    TryPlaySound(key)
 end
 
 -- Aura-based alert: pass isActive=true to show, false to hide

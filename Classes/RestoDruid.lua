@@ -95,13 +95,14 @@ local function LB_Check()
 end
 
 local lifeblosomDef = {
-    key         = "lifebloom",
-    name        = "Lifebloom",
-    spellID     = SPELL_LIFEBLOOM,
-    type        = "aura",
-    order       = 1,
-    defaultGlow = "ants",
-    defaultText = "Lifebloom expiring!",
+    key          = "lifebloom",
+    name         = "Lifebloom",
+    spellID      = SPELL_LIFEBLOOM,
+    type         = "aura",
+    order        = 1,
+    defaultGlow  = "ants",
+    defaultText  = "Lifebloom expiring!",
+    defaultSound = "lifebloom_expiring.ogg",
 
     onSpecActivated = LB_Check,
 
@@ -144,13 +145,14 @@ local function SM_Check()
 end
 
 local swiftmendDef = {
-    key         = "swiftmend",
-    name        = "Swiftmend",
-    spellID     = SPELL_SWIFTMEND,
-    type        = "cooldown",
-    order       = 2,
-    defaultGlow = "action",
-    defaultText = "Swiftmend ready!",
+    key          = "swiftmend",
+    name         = "Swiftmend",
+    spellID      = SPELL_SWIFTMEND,
+    type         = "cooldown",
+    order        = 2,
+    defaultGlow  = "action",
+    defaultText  = "Swiftmend ready!",
+    defaultSound = "swiftmend_ready.ogg",
 
     onSpecActivated  = SM_Check,
     onCooldownUpdate = SM_Check,
@@ -170,13 +172,14 @@ local function WG_Check()
 end
 
 local wildGrowthDef = {
-    key         = "wildgrowth",
-    name        = "Wild Growth",
-    spellID     = SPELL_WILDGROWTH,
-    type        = "cooldown",
-    order       = 3,
-    defaultGlow = "action",
-    defaultText = "Wild Growth ready!",
+    key          = "wildgrowth",
+    name         = "Wild Growth",
+    spellID      = SPELL_WILDGROWTH,
+    type         = "cooldown",
+    order        = 3,
+    defaultGlow  = "action",
+    defaultText  = "Wild Growth ready!",
+    defaultSound = "wildgrowth_ready.ogg",
 
     onSpecActivated  = WG_Check,
     onCooldownUpdate = WG_Check,
@@ -193,6 +196,10 @@ local wildGrowthDef = {
 --               5-10 stacks → yellow
 --               > 10 stacks → green
 -- ============================================================
+-- Tracks the previous aura presence so we can detect the present→absent
+-- transition and fire the "missing" sound at the right moment.
+local abundanceWasPresent = nil
+
 local function AB_Check()
     local aura  = GetAura(SPELL_ABUNDANCE_BUFF)   -- query the buff, not the talent
     local count = aura and (aura.applications or 0) or 0
@@ -204,11 +211,19 @@ local function AB_Check()
     HA:HandleAuraChange("abundance", true, aura)
 
     if not aura then
+        -- Play the "missing" sound only on the present→absent transition, not
+        -- every UNIT_AURA tick while the buff remains absent.
+        if abundanceWasPresent then
+            HA:PlayAlertSound("abundance")
+        end
+        abundanceWasPresent = false
+
         -- Buff missing: red tint + marching ants warning
         HA:SetIconOverlay("abundance", 0.9, 0.1, 0.1, 0.5)
         HA:UpdateGlow("abundance", "ants")
         HA:SetBigCount("abundance", 0)
     else
+        abundanceWasPresent = true
         -- Buff present: clear overlay + color-coded stack count
         HA:SetIconOverlay("abundance", 0, 0, 0, 0)
         HA:UpdateGlow("abundance", "none")
@@ -225,13 +240,14 @@ local function AB_Check()
 end
 
 local abundanceDef = {
-    key         = "abundance",
-    name        = "Abundance",
-    spellID     = SPELL_ABUNDANCE,
-    type        = "aura_count",
-    order       = 4,
-    defaultGlow = "none",   -- AB_Check drives glow via UpdateGlow immediately after
-    defaultText = "",
+    key          = "abundance",
+    name         = "Abundance",
+    spellID      = SPELL_ABUNDANCE,
+    type         = "aura_count",
+    order        = 4,
+    defaultGlow  = "none",   -- AB_Check drives glow via UpdateGlow immediately after
+    defaultText  = "",
+    defaultSound = "abundance_missing.ogg",
 
     onSpecActivated = AB_Check,
 
