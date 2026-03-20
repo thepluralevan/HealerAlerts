@@ -1,16 +1,21 @@
 -- Classes/RestoDruid.lua
 -- Restoration Druid (specID 105) alert definitions
 --
--- ┌─────────────┬──────────┬────────────────────────────────────────────────┐
--- │ Alert        │ SpellID  │ Trigger                                        │
--- ├─────────────┼──────────┼────────────────────────────────────────────────┤
--- │ Lifebloom    │ 33763    │ Alert when MISSING or < 4.5s remaining         │
--- │ Swiftmend    │ 18562    │ Alert when OFF cooldown (ready to cast)         │
--- │ Wild Growth  │ 48438    │ Alert when OFF cooldown (ready to cast)         │
--- │ Abundance    │ 207383   │ Always shown; badge shows current stack count   │
--- │              │ (buff 207640) │ talent ID ≠ buff ID — icon uses 207383,   │
--- │              │          │ aura query uses 207640                          │
--- └─────────────┴──────────┴────────────────────────────────────────────────┘
+-- ┌──────────────────────┬──────────┬────────────────────────────────────────────────┐
+-- │ Alert                │ SpellID  │ Trigger                                        │
+-- ├──────────────────────┼──────────┼────────────────────────────────────────────────┤
+-- │ Lifebloom            │ 33763    │ Alert when MISSING or < 4.5s remaining         │
+-- │ Swiftmend            │ 18562    │ Alert when OFF cooldown (ready to cast)         │
+-- │ Wild Growth          │ 48438    │ Alert when OFF cooldown (ready to cast)         │
+-- │ Abundance            │ 207383   │ Always shown; badge shows current stack count   │
+-- │                      │(buff 207640)│ talent ID ≠ buff ID — icon uses 207383,    │
+-- │                      │          │ aura query uses 207640                          │
+-- │ Convoke the Spirits  │ 391528   │ Ready when OFF CD. TALENT-GATED (IsPlayerSpell)│
+-- │                      │          │ Mutually exclusive with Incarnation             │
+-- │ Tranquility          │ 740      │ Ready when OFF CD. TALENT-GATED (IsPlayerSpell)│
+-- │ Incarnation: ToL     │ 33891    │ Ready when OFF CD. TALENT-GATED (IsPlayerSpell)│
+-- │                      │          │ Mutually exclusive with Convoke                 │
+-- └──────────────────────┴──────────┴────────────────────────────────────────────────┘
 --
 -- API used:
 --   C_UnitAuras.GetPlayerAuraBySpellID(spellID) → AuraData?
@@ -34,6 +39,14 @@ local SPELL_WILDGROWTH = 48438
 local SPELL_ABUNDANCE       = 207383  -- talent node (used for icon texture + tooltip)
 local SPELL_ABUNDANCE_BUFF  = 207640  -- actual player buff applied by the talent
                                        -- (talent ID ≠ buff ID — verified in-game)
+
+-- Major cooldowns — all talent-gated (verified via IsPlayerSpell at runtime).
+-- Convoke and Incarnation are mutually exclusive talent choices.
+-- NOTE: spell IDs verified in-game by the user — do NOT trust wowhead/wowwiki
+-- for these; the retail IDs changed between expansions.
+local SPELL_CONVOKE      = 391528   -- Convoke the Spirits (verified in-game March 2026)
+local SPELL_TRANQUILITY  = 740      -- Tranquility (verified in-game March 2026)
+local SPELL_INCARNATION  = 33891    -- Incarnation: Tree of Life (verified in-game March 2026)
 
 -- How many seconds before Lifebloom expiry we start showing the alert
 local LB_WARN_THRESHOLD = 4.5
@@ -66,6 +79,15 @@ local function CDIsReady(cdInfo)
     if cdInfo.startTime == 0 or cdInfo.startTime == nil then return true end
     -- GCD-only: real cooldown has not started
     return (cdInfo.duration or 0) <= GCD_THRESHOLD
+end
+
+-- Returns true if the player has learned the spell (from spec, talent, etc.).
+-- Used to gate talent-dependent alerts — if the spell is not known the alert
+-- is immediately deactivated so it never occupies a slot in the icon bar.
+-- IsPlayerSpell is a long-standing Blizzard global (pre-docs era); verify
+-- in-game if behaviour seems wrong on a new patch.
+local function IsKnown(spellID)
+    return IsPlayerSpell(spellID) == true
 end
 
 -- ============================================================
@@ -269,15 +291,119 @@ local abundanceDef = {
 }
 
 -- ============================================================
+-- CONVOKE THE SPIRITS  (talent-gated, mutually exclusive with Incarnation)
+-- Shows when the talent is taken AND the spell is off cooldown.
+-- ============================================================
+local function CV_Check()
+    if not IsKnown(SPELL_CONVOKE) then
+        -- Talent not taken: ensure the icon stays hidden and return.
+        HA:HandleCooldownChange("convoke", false, 0, 0, 1)
+        return
+    end
+    local cd    = GetCD(SPELL_CONVOKE)
+    local ready = CDIsReady(cd)
+    local start = (not ready and cd) and cd.startTime or 0
+    local dur   = (not ready and cd) and cd.duration  or 0
+    local mod   = cd and cd.modRate or 1
+    HA:HandleCooldownChange("convoke", ready, start, dur, mod)
+end
+
+local convokeDef = {
+    key          = "convoke",
+    name         = "Convoke the Spirits",
+    spellID      = SPELL_CONVOKE,
+    type         = "cooldown",
+    order        = 5,
+    defaultGlow  = "action",
+    defaultText  = "Convoke ready!",
+    defaultSound = "convoke_ready.ogg",
+
+    onSpecActivated  = CV_Check,
+    onCooldownUpdate = CV_Check,
+    onAuraUpdate     = nil,
+}
+
+-- ============================================================
+-- TRANQUILITY  (talent-gated)
+-- Shows when the talent is taken AND the spell is off cooldown.
+-- ============================================================
+local function TQ_Check()
+    if not IsKnown(SPELL_TRANQUILITY) then
+        HA:HandleCooldownChange("tranquility", false, 0, 0, 1)
+        return
+    end
+    local cd    = GetCD(SPELL_TRANQUILITY)
+    local ready = CDIsReady(cd)
+    local start = (not ready and cd) and cd.startTime or 0
+    local dur   = (not ready and cd) and cd.duration  or 0
+    local mod   = cd and cd.modRate or 1
+    HA:HandleCooldownChange("tranquility", ready, start, dur, mod)
+end
+
+local tranquilityDef = {
+    key          = "tranquility",
+    name         = "Tranquility",
+    spellID      = SPELL_TRANQUILITY,
+    type         = "cooldown",
+    order        = 6,
+    defaultGlow  = "action",
+    defaultText  = "Tranquility ready!",
+    defaultSound = "tranquility_ready.ogg",
+
+    onSpecActivated  = TQ_Check,
+    onCooldownUpdate = TQ_Check,
+    onAuraUpdate     = nil,
+}
+
+-- ============================================================
+-- INCARNATION: TREE OF LIFE  (talent-gated, mutually exclusive with Convoke)
+-- Shows when the talent is taken AND the spell is off cooldown.
+-- Shares order=5 with Convoke — only one will ever be active.
+-- ============================================================
+local function IT_Check()
+    if not IsKnown(SPELL_INCARNATION) then
+        HA:HandleCooldownChange("incarnation", false, 0, 0, 1)
+        return
+    end
+    local cd    = GetCD(SPELL_INCARNATION)
+    local ready = CDIsReady(cd)
+    local start = (not ready and cd) and cd.startTime or 0
+    local dur   = (not ready and cd) and cd.duration  or 0
+    local mod   = cd and cd.modRate or 1
+    HA:HandleCooldownChange("incarnation", ready, start, dur, mod)
+end
+
+local incarnationDef = {
+    key          = "incarnation",
+    name         = "Incarnation: Tree of Life",
+    spellID      = SPELL_INCARNATION,
+    type         = "cooldown",
+    order        = 5,   -- same slot as Convoke; they are mutually exclusive talents
+    defaultGlow  = "action",
+    defaultText  = "Incarnation ready!",
+    defaultSound = "incarnation_ready.ogg",
+
+    onSpecActivated  = IT_Check,
+    onCooldownUpdate = IT_Check,
+    onAuraUpdate     = nil,
+}
+
+-- ============================================================
 -- REGISTER
 -- ============================================================
 HA:RegisterAlert(lifeblosomDef)
 HA:RegisterAlert(swiftmendDef)
 HA:RegisterAlert(wildGrowthDef)
 HA:RegisterAlert(abundanceDef)
+HA:RegisterAlert(convokeDef)
+HA:RegisterAlert(tranquilityDef)
+HA:RegisterAlert(incarnationDef)
 
 HA:RegisterClassSpec({
     classFilename = CLASS_FILENAME,
     specID        = SPEC_ID,
-    alertKeys     = { "lifebloom", "swiftmend", "wildgrowth", "abundance" },
+    alertKeys     = {
+        "lifebloom", "swiftmend", "wildgrowth", "abundance",
+        "convoke", "tranquility", "incarnation",
+    },
 })

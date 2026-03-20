@@ -328,9 +328,11 @@ local function LayoutIcons()
     local size = DB().iconSize
     local step = size + 4
 
+    -- Only include ACTIVE alerts in the layout so talent-gated or
+    -- on-cooldown icons don't reserve empty phantom slots in the bar.
     local ordered = {}
     for key, state in pairs(HA.alerts) do
-        if HA.iconFrames[key] then
+        if HA.iconFrames[key] and state.active then
             ordered[#ordered + 1] = { key = key, order = state.def.order or 99 }
         end
     end
@@ -589,6 +591,7 @@ local ef = CreateFrame("Frame")
 ef:RegisterEvent("ADDON_LOADED")
 ef:RegisterEvent("PLAYER_ENTERING_WORLD")
 ef:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+ef:RegisterEvent("PLAYER_TALENT_UPDATE")   -- fires when talents are committed
 ef:RegisterEvent("UNIT_AURA")
 ef:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 
@@ -618,6 +621,10 @@ ef:SetScript("OnEvent", function(self, event, ...)
         OnSpecActivated()
 
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
+        OnSpecActivated()
+
+    elseif event == "PLAYER_TALENT_UPDATE" then
+        -- Re-evaluate talent-gated alerts whenever talents are committed.
         OnSpecActivated()
 
     elseif event == "UNIT_AURA" then
