@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Piper TTS voice models — large binary files, not part of the addon
+Sounds/*.onnx
+Sounds/*.onnx.json
+
+# Sound generation script — development tooling, not needed in the addon
+Sounds/generate_sounds.py
+
+# Generated OGG files are intentionally NOT ignored — commit them so the
+# addon ships with sounds out of the box. If you prefer not to track them
+# (e.g. sounds are distributed separately), uncomment the line below:
+# Sounds/*.ogg
