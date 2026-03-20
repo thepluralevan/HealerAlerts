@@ -1,0 +1,15 @@
+## Interface: 120001
+## Title: HealerAlerts
+## Notes: Cooldown and buff tracker with icon/text alerts for healer specializations
+## Author: You
+## Version: 1.0.0
+## SavedVariables: HealerAlertsDB
+
+# Core
+HealerAlerts.lua
+
+# Settings UI
+HealerAlerts_Config.lua
+
+# Class definitions (add new files here for new classes)
+Classes/RestoDruid.lua
