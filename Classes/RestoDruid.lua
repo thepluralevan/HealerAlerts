@@ -8,6 +8,8 @@
 -- │ Swiftmend    │ 18562    │ Alert when OFF cooldown (ready to cast)         │
 -- │ Wild Growth  │ 48438    │ Alert when OFF cooldown (ready to cast)         │
 -- │ Abundance    │ 207383   │ Always shown; badge shows current stack count   │
+-- │              │ (buff 207640) │ talent ID ≠ buff ID — icon uses 207383,   │
+-- │              │          │ aura query uses 207640                          │
 -- └─────────────┴──────────┴────────────────────────────────────────────────┘
 --
 -- API used:
@@ -29,7 +31,9 @@ local SPEC_ID        = 105       -- Restoration
 local SPELL_LIFEBLOOM  = 33763
 local SPELL_SWIFTMEND  = 18562
 local SPELL_WILDGROWTH = 48438
-local SPELL_ABUNDANCE  = 207383
+local SPELL_ABUNDANCE       = 207383  -- talent node (used for icon texture + tooltip)
+local SPELL_ABUNDANCE_BUFF  = 207640  -- actual player buff applied by the talent
+                                       -- (talent ID ≠ buff ID — verified in-game)
 
 -- How many seconds before Lifebloom expiry we start showing the alert
 local LB_WARN_THRESHOLD = 4.5
@@ -180,14 +184,44 @@ local wildGrowthDef = {
 }
 
 -- ============================================================
--- ABUNDANCE  (stack tracker)
--- Always shows when any stacks are present; badge = current count.
--- defaultText intentionally empty — badge is the primary indicator.
+-- ABUNDANCE  (permanent stack tracker)
+-- Icon is ALWAYS visible — it acts as a persistent tracker, not a conditional
+-- alert.  Two visual states:
+--   Missing : red overlay + marching-ants border → "you have no Abundance"
+--   Present : clear icon + large centered stack count, color-coded:
+--               < 5  stacks → orange
+--               5-10 stacks → yellow
+--               > 10 stacks → green
 -- ============================================================
 local function AB_Check()
-    local aura = GetAura(SPELL_ABUNDANCE)
-    HA:HandleAuraChange("abundance", aura ~= nil, aura)
-    HA:SetBadge("abundance", aura and (aura.applications or 0) or 0)
+    local aura  = GetAura(SPELL_ABUNDANCE_BUFF)   -- query the buff, not the talent
+    local count = aura and (aura.applications or 0) or 0
+
+    -- Always keep the icon visible regardless of buff state.
+    -- HandleAuraChange with isActive=true activates on first call;
+    -- subsequent calls return early from ActivateAlert but we still
+    -- update glow / overlay / count below.
+    HA:HandleAuraChange("abundance", true, aura)
+
+    if not aura then
+        -- Buff missing: red tint + marching ants warning
+        HA:SetIconOverlay("abundance", 0.9, 0.1, 0.1, 0.5)
+        HA:UpdateGlow("abundance", "ants")
+        HA:SetBigCount("abundance", 0)
+    else
+        -- Buff present: clear overlay + color-coded stack count
+        HA:SetIconOverlay("abundance", 0, 0, 0, 0)
+        HA:UpdateGlow("abundance", "none")
+        local r, g, b
+        if count > 10 then
+            r, g, b = 0.1, 1.0, 0.1   -- green
+        elseif count >= 5 then
+            r, g, b = 1.0, 1.0, 0.1   -- yellow
+        else
+            r, g, b = 1.0, 0.55, 0.1  -- orange
+        end
+        HA:SetBigCount("abundance", count, r, g, b)
+    end
 end
 
 local abundanceDef = {
@@ -196,7 +230,7 @@ local abundanceDef = {
     spellID     = SPELL_ABUNDANCE,
     type        = "aura_count",
     order       = 4,
-    defaultGlow = "none",
+    defaultGlow = "none",   -- AB_Check drives glow via UpdateGlow immediately after
     defaultText = "",
 
     onSpecActivated = AB_Check,
@@ -206,7 +240,7 @@ local abundanceDef = {
         local relevant = false
         if updateInfo.addedAuras then
             for _, a in ipairs(updateInfo.addedAuras) do
-                if a.spellId == SPELL_ABUNDANCE then relevant = true; break end
+                if a.spellId == SPELL_ABUNDANCE_BUFF then relevant = true; break end
             end
         end
         if not relevant and (updateInfo.removedAuraInstanceIDs or updateInfo.updatedAuraInstanceIDs) then

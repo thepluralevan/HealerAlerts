@@ -249,11 +249,28 @@ local function BuildIconFrame(def)
     cd:SetHideCountdownNumbers(false)
     btn._cd = cd
 
-    -- Stack count badge (lower-right)
+    -- Stack count badge (lower-right, small — for incidental stack display)
     local badge = btn:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
     badge:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -1, 2)
     badge:Hide()
     btn._badge = badge
+
+    -- Color overlay — lets alerts tint the icon (e.g. red when a buff is missing).
+    -- Sits in OVERLAY layer so it's above the ARTWORK icon but below child frames.
+    -- Hidden by default; shown via HA:SetIconOverlay().
+    local overlay = btn:CreateTexture(nil, "OVERLAY")
+    overlay:SetPoint("TOPLEFT",     btn, "TOPLEFT",      2,  -2)
+    overlay:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -2,   2)
+    overlay:SetColorTexture(1, 0, 0, 0)
+    overlay:Hide()
+    btn._overlay = overlay
+
+    -- Large centered count — for stack-tracker alerts that want a prominent number.
+    -- Shown/hidden and colored via HA:SetBigCount().
+    local bigCount = btn:CreateFontString(nil, "OVERLAY", "NumberFontNormalLarge")
+    bigCount:SetPoint("CENTER", btn, "CENTER", 0, 0)
+    bigCount:Hide()
+    btn._bigCount = bigCount
 
     -- Marching ants effect
     btn._ants = Ants_Build(btn)
@@ -435,7 +452,7 @@ function HA:SetCooldownSweep(key, startTime, duration, modRate)
     if btn then btn._cd:SetCooldown(startTime or 0, duration or 0, modRate or 1) end
 end
 
--- Set or hide the stack count badge on an icon
+-- Set or hide the small BOTTOMRIGHT stack count badge on an icon
 function HA:SetBadge(key, count)
     local btn = HA.iconFrames[key]
     if not btn then return end
@@ -444,6 +461,42 @@ function HA:SetBadge(key, count)
         btn._badge:Show()
     else
         btn._badge:Hide()
+    end
+end
+
+-- Show or hide the full-icon color overlay.
+-- Pass r,g,b,a to tint (e.g. 0.9,0.1,0.1,0.5 for a red warning tint).
+-- Pass a=0 (or call with no color args) to hide the overlay.
+function HA:SetIconOverlay(key, r, g, b, a)
+    local btn = HA.iconFrames[key]
+    if not btn then return end
+    if not a or a <= 0 then
+        btn._overlay:Hide()
+    else
+        btn._overlay:SetColorTexture(r or 1, g or 0, b or 0, a)
+        btn._overlay:Show()
+    end
+end
+
+-- Update the glow on an icon that is already active (ActivateAlert only applies
+-- glow on first activation; use this to change it without a full re-activate).
+function HA:UpdateGlow(key, glowType)
+    local btn = HA.iconFrames[key]
+    if not btn then return end
+    ApplyGlow(btn, glowType)
+end
+
+-- Show a large centered stack count on an icon, colored by the given r,g,b.
+-- Pass count=0 (or nil) to hide the label.
+function HA:SetBigCount(key, count, r, g, b)
+    local btn = HA.iconFrames[key]
+    if not btn then return end
+    if count and count > 0 then
+        btn._bigCount:SetText(tostring(count))
+        btn._bigCount:SetTextColor(r or 1, g or 1, b or 1)
+        btn._bigCount:Show()
+    else
+        btn._bigCount:Hide()
     end
 end
 
