@@ -1,0 +1,790 @@
+-- JouicyReminders.lua
+-- Core engine: four independent alert categories, each with its own anchor.
+--
+--   cooldown   — spell cooldown icons  (blue drag handle)
+--   upkeep     — persistent tracker icons (green drag handle)
+--   rotational — rotational priority icons (orange drag handle)
+--   text       — scrolling text alerts (purple drag handle)
+--
+-- API used (all TWW / Midnight 12.0.x verified):
+--   C_Spell.GetSpellInfo(spellID) -> SpellInfo{iconID, name, ...}
+--   C_Spell.GetSpellCooldown(spellID) -> SpellCooldownInfo{...}
+--   C_UnitAuras.GetPlayerAuraBySpellID(spellID) -> AuraData?
+--   UNIT_AURA, SPELL_UPDATE_COOLDOWN, PLAYER_TALENT_UPDATE, etc.
+--   ActionButton_ShowOverlayGlow / ActionButton_HideOverlayGlow
+
+local AddonName, JR = ...
+
+-- ============================================================
+-- CONSTANTS
+-- ============================================================
+local CATEGORIES      = { "cooldown", "upkeep", "rotational", "text" }
+local ICON_CATEGORIES = { "cooldown", "upkeep", "rotational" }
+
+-- Default config for each anchor (x/y = BOTTOMLEFT offset from UIParent origin)
+local ANCHOR_DEFAULTS = {
+    cooldown   = { x = 400, y = 300, locked = false, iconSize = 48, growDirection = "RIGHT" },
+    upkeep     = { x = 400, y = 240, locked = false, iconSize = 48, growDirection = "RIGHT" },
+    rotational = { x = 600, y = 300, locked = false, iconSize = 48, growDirection = "RIGHT" },
+    text       = { x = 400, y = 180, locked = false },
+}
+
+-- Drag handle colors (r, g, b, a)
+local ANCHOR_COLORS = {
+    cooldown   = { 0.1,  0.4,  0.9,  0.45 },   -- blue
+    upkeep     = { 0.1,  0.8,  0.1,  0.45 },   -- green
+    rotational = { 0.9,  0.5,  0.1,  0.45 },   -- orange
+    text       = { 0.6,  0.1,  0.9,  0.45 },   -- purple
+}
+
+local ANCHOR_NAMES = {
+    cooldown   = "JR: Cooldowns",
+    upkeep     = "JR: Upkeep",
+    rotational = "JR: Rotational",
+    text       = "JR: Text Alerts",
+}
+
+-- Text shown for active alerts that have no explicit defaultText.
+-- Resolution order: user cfg.text > def.defaultText > this template
+local CATEGORY_TEXT_TEMPLATE = {
+    cooldown   = "%s is ready!",
+    upkeep     = "%s is missing!",
+    rotational = "Use %s!",
+}
+
+-- ============================================================
+-- STATE
+-- ============================================================
+JR.alerts         = {}   -- alertKey -> { def, active, auraData }
+JR.iconFrames     = {}   -- alertKey -> Button
+JR.textFrames     = {}   -- alertKey -> FontString
+JR.classDefs      = {}   -- "CLASSFILENAME_specID" -> spec table
+JR._pendingAlerts = {}   -- defs registered before ADDON_LOADED
+JR._settingsCategory = nil
+
+-- ============================================================
+-- ANCHOR FRAMES  (created at file load; positioned after ADDON_LOADED)
+-- ============================================================
+local anchorFrames = {}   -- cat -> Frame
+local anchorBGs    = {}   -- cat -> Texture  (drag handle background)
+local anchorLbls   = {}   -- cat -> FontString (drag handle label)
+
+for _, cat in ipairs(CATEGORIES) do
+    local f = CreateFrame("Frame", "JouicyReminders_Anchor_" .. cat, UIParent)
+    f:SetSize(1, 1)
+    f:SetMovable(true)
+    f:EnableMouse(false)
+    anchorFrames[cat] = f
+end
+
+-- ============================================================
+-- DB ACCESSORS  (only safe after ADDON_LOADED)
+-- ============================================================
+local function DB()
+    return JouicyRemindersDB
+end
+
+local function AnchorCfg(cat)
+    return DB().anchors[cat]
+end
+
+local function AlertCfg(key)
+    return DB().alerts[key] or {}
+end
+
+-- ============================================================
+-- DRAG HANDLES
+-- ============================================================
+local function MakeDragHandle(cat)
+    local frame = anchorFrames[cat]
+    local col   = ANCHOR_COLORS[cat]
+
+    local bg = frame:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(col[1], col[2], col[3], col[4])
+
+    local lbl = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    lbl:SetAllPoints()
+    lbl:SetText(ANCHOR_NAMES[cat])
+    lbl:SetTextColor(1, 1, 1)
+
+    frame:SetScript("OnMouseDown", function(self, btn)
+        if btn == "LeftButton" then self:StartMoving() end
+    end)
+    frame:SetScript("OnMouseUp", function(self)
+        self:StopMovingOrSizing()
+        -- GetLeft()/GetBottom() give absolute screen coords == BOTTOMLEFT-of-UIParent
+        -- offsets we store (UIParent origin is always 0,0).
+        local x = self:GetLeft()
+        local y = self:GetBottom()
+        if x and y then
+            AnchorCfg(cat).x = math.floor(x + 0.5)
+            AnchorCfg(cat).y = math.floor(y + 0.5)
+        end
+    end)
+
+    bg:Hide(); lbl:Hide()
+    anchorBGs[cat]  = bg
+    anchorLbls[cat] = lbl
+end
+
+for _, cat in ipairs(CATEGORIES) do
+    MakeDragHandle(cat)
+end
+
+local function UpdateAnchors()
+    for _, cat in ipairs(CATEGORIES) do
+        local cfg = AnchorCfg(cat)
+        local f   = anchorFrames[cat]
+        f:ClearAllPoints()
+        f:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", cfg.x, cfg.y)
+    end
+end
+
+-- ============================================================
+-- GLOW — ACTION BUTTON STYLE
+-- Blizzard's overlay glow used for proc indicators on action buttons.
+-- ============================================================
+local function GlowAction_Show(btn)
+    if ActionButton_ShowOverlayGlow then ActionButton_ShowOverlayGlow(btn) end
+end
+local function GlowAction_Hide(btn)
+    if ActionButton_HideOverlayGlow then ActionButton_HideOverlayGlow(btn) end
+end
+
+-- ============================================================
+-- GLOW — MARCHING ANTS
+-- Square texture segments orbit the button perimeter clockwise,
+-- driven by OnUpdate on each icon button.
+-- ============================================================
+local ANTS_N     = 12
+local ANTS_SZ    = 3
+local ANTS_CYCLE = 3.75   -- seconds per full orbit
+
+local function Ants_Build(parent)
+    local segs = {}
+    for i = 1, ANTS_N do
+        local t = parent:CreateTexture(nil, "OVERLAY")
+        t:SetColorTexture(1, 0.92, 0.2, 1)
+        t:SetSize(ANTS_SZ, ANTS_SZ)
+        t:Hide()
+        segs[i] = t
+    end
+    return { segs = segs, active = false, elapsed = 0, parent = parent }
+end
+
+local function Ants_Update(ants, dt)
+    if not ants.active then return end
+    ants.elapsed = (ants.elapsed + dt) % ANTS_CYCLE
+    local p      = ants.parent
+    local sz     = p:GetWidth()
+    local half   = sz / 2
+    local perim  = sz * 4
+    local segGap = perim / ANTS_N
+    local prog   = (ants.elapsed / ANTS_CYCLE) * perim
+
+    for i, t in ipairs(ants.segs) do
+        local d = ((i - 1) * segGap + prog) % perim
+        local ox, oy
+        if d < sz then
+            ox = -half + d;           oy =  half
+        elseif d < sz * 2 then
+            ox =  half;               oy =  half - (d - sz)
+        elseif d < sz * 3 then
+            ox =  half - (d - sz*2);  oy = -half
+        else
+            ox = -half;               oy = -half + (d - sz*3)
+        end
+        t:ClearAllPoints()
+        t:SetPoint("CENTER", p, "CENTER", ox, oy)
+    end
+end
+
+local function Ants_Show(ants) ants.active = true;  ants.elapsed = 0; for _, t in ipairs(ants.segs) do t:Show() end end
+local function Ants_Hide(ants) ants.active = false; for _, t in ipairs(ants.segs) do t:Hide() end end
+
+-- ============================================================
+-- SOUND
+-- ============================================================
+local function TryPlaySound(key)
+    local cfg   = AlertCfg(key)
+    local state = JR.alerts[key]
+    local snd   = (cfg.sound and cfg.sound ~= "" and cfg.sound)
+               or (state and state.def.defaultSound)
+    if snd and snd ~= "" then
+        PlaySoundFile("Interface\\AddOns\\JouicyReminders\\Sounds\\" .. snd, "Master")
+    end
+end
+
+-- ============================================================
+-- ICON FRAME BUILDER  (called after DB is ready)
+-- Parented to the anchor frame for the alert's category.
+-- ============================================================
+local function BuildIconFrame(def)
+    local cat    = def.category or "cooldown"
+    local anchor = anchorFrames[cat]
+    local size   = AnchorCfg(cat).iconSize or 48
+    local btn    = CreateFrame("Button", nil, anchor)
+    btn:SetSize(size, size)
+
+    -- Dark background behind icon
+    local bg = btn:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0, 0, 0, 0.6)
+
+    -- Icon texture with trimmed border
+    local icon = btn:CreateTexture(nil, "ARTWORK")
+    icon:SetPoint("TOPLEFT",     btn, "TOPLEFT",      2,  -2)
+    icon:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -2,   2)
+    icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    btn._icon = icon
+
+    -- Cooldown sweep overlay
+    local cd = CreateFrame("Cooldown", nil, btn, "CooldownFrameTemplate")
+    cd:SetAllPoints()
+    cd:SetDrawEdge(true)
+    cd:SetHideCountdownNumbers(false)
+    btn._cd = cd
+
+    -- Stack count badge (lower-right, small)
+    local badge = btn:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
+    badge:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -1, 2)
+    badge:Hide()
+    btn._badge = badge
+
+    -- Color overlay — tints the icon (e.g. red when a buff is missing).
+    local overlay = btn:CreateTexture(nil, "OVERLAY")
+    overlay:SetPoint("TOPLEFT",     btn, "TOPLEFT",      2,  -2)
+    overlay:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -2,   2)
+    overlay:SetColorTexture(1, 0, 0, 0)
+    overlay:Hide()
+    btn._overlay = overlay
+
+    -- Large centered count — for stack-tracker alerts.
+    local bigCount = btn:CreateFontString(nil, "OVERLAY", "NumberFontNormalLarge")
+    bigCount:SetPoint("CENTER", btn, "CENTER", 0, 0)
+    bigCount:Hide()
+    btn._bigCount = bigCount
+
+    -- Marching ants effect
+    btn._ants = Ants_Build(btn)
+    btn:SetScript("OnUpdate", function(self, dt) Ants_Update(self._ants, dt) end)
+
+    -- Hover tooltip
+    btn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        if def.spellID then
+            GameTooltip:SetSpellByID(def.spellID)
+        else
+            GameTooltip:SetText(def.name or def.key)
+        end
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    -- Populate spell icon
+    if def.spellID then
+        local info = C_Spell.GetSpellInfo(def.spellID)
+        if info and info.iconID then icon:SetTexture(info.iconID) end
+    elseif def.icon then
+        icon:SetTexture(def.icon)
+    end
+
+    btn:Hide()
+    JR.iconFrames[def.key] = btn
+    return btn
+end
+
+-- ============================================================
+-- TEXT FRAME BUILDER
+-- All text frames are parented to the text anchor.
+-- ============================================================
+local function BuildTextFrame(def)
+    local fs = anchorFrames["text"]:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    fs:SetTextColor(1, 0.85, 0.1, 1)
+    fs:Hide()
+    JR.textFrames[def.key] = fs
+    return fs
+end
+
+-- ============================================================
+-- LAYOUT HELPERS
+-- ============================================================
+
+-- Layout icons for a single category's anchor.
+-- Only active alerts occupy slots — no phantom gaps for hidden/ungated icons.
+local function LayoutIconsForCategory(cat)
+    local cfg    = AnchorCfg(cat)
+    local dir    = cfg.growDirection or "RIGHT"
+    local size   = cfg.iconSize or 48
+    local step   = size + 4
+    local anchor = anchorFrames[cat]
+
+    local ordered = {}
+    for key, state in pairs(JR.alerts) do
+        if state.def.category == cat and JR.iconFrames[key] and state.active then
+            ordered[#ordered + 1] = { key = key, order = state.def.order or 99 }
+        end
+    end
+    table.sort(ordered, function(a, b) return a.order < b.order end)
+
+    local n   = #ordered
+    local ext = n > 0 and (n * step - 4) or size
+    if dir == "RIGHT" or dir == "LEFT" then
+        anchor:SetSize(ext, size)
+    else
+        anchor:SetSize(size, ext)
+    end
+
+    for i, entry in ipairs(ordered) do
+        local btn    = JR.iconFrames[entry.key]
+        local offset = (i - 1) * step
+        btn:ClearAllPoints()
+        btn:SetSize(size, size)
+        if     dir == "RIGHT" then btn:SetPoint("LEFT",   anchor, "LEFT",    offset, 0)
+        elseif dir == "LEFT"  then btn:SetPoint("RIGHT",  anchor, "RIGHT",  -offset, 0)
+        elseif dir == "UP"    then btn:SetPoint("BOTTOM", anchor, "BOTTOM",  0,  offset)
+        elseif dir == "DOWN"  then btn:SetPoint("TOP",    anchor, "TOP",     0, -offset)
+        end
+    end
+end
+
+local function LayoutIcons()
+    for _, cat in ipairs(ICON_CATEGORIES) do
+        LayoutIconsForCategory(cat)
+    end
+end
+
+local TEXT_LINE_H = 22
+local function LayoutTexts()
+    -- Collect active alerts from all categories that have displayable text.
+    -- Text resolution: user cfg.text > def.defaultText > category template.
+    local active = {}
+    for key, state in pairs(JR.alerts) do
+        if state.active then
+            local def = state.def
+            local cfg = AlertCfg(key)
+            local txt
+            if cfg.text ~= nil then
+                txt = cfg.text
+            elseif def.defaultText ~= nil then
+                txt = def.defaultText
+            else
+                local tmpl = CATEGORY_TEXT_TEMPLATE[def.category or "cooldown"]
+                txt = tmpl and string.format(tmpl, def.name or def.key) or nil
+            end
+            if txt and txt ~= "" then
+                active[#active + 1] = { key = key, order = def.order or 99, text = txt }
+            end
+        end
+    end
+    table.sort(active, function(a, b) return a.order < b.order end)
+
+    for _, fs in pairs(JR.textFrames) do
+        fs:ClearAllPoints()
+        fs:Hide()
+    end
+    for i, entry in ipairs(active) do
+        local fs = JR.textFrames[entry.key]
+        if fs then
+            fs:SetText(entry.text)
+            fs:ClearAllPoints()
+            fs:SetPoint("TOPLEFT", anchorFrames["text"], "TOPLEFT", 0, -((i - 1) * TEXT_LINE_H))
+            fs:Show()
+        end
+    end
+    anchorFrames["text"]:SetHeight(math.max(#active * TEXT_LINE_H, 22))
+end
+
+-- ============================================================
+-- LOCK STATE  (independent per anchor)
+-- ============================================================
+local function ApplyLockStateForCategory(cat)
+    local cfg    = AnchorCfg(cat)
+    local locked = cfg.locked
+    local anchor = anchorFrames[cat]
+
+    if cat ~= "text" then
+        -- Resize anchor to cover the actual current icon bar
+        local size  = cfg.iconSize or 48
+        local step  = size + 4
+        local dir   = cfg.growDirection or "RIGHT"
+        local count = 0
+        for key, state in pairs(JR.alerts) do
+            if state.def.category == cat and JR.iconFrames[key] and state.active then
+                count = count + 1
+            end
+        end
+        local ext = count > 0 and (count * step - 4) or size
+        if dir == "RIGHT" or dir == "LEFT" then
+            anchor:SetSize(ext, size)
+        else
+            anchor:SetSize(size, ext)
+        end
+
+        -- When unlocked: anchor receives mouse (for dragging).
+        -- When locked: individual icon buttons receive mouse (for tooltips).
+        -- Icon buttons are children of the anchor and would intercept clicks
+        -- during dragging, so we swap mouse ownership here.
+        anchor:EnableMouse(not locked)
+        for key, state in pairs(JR.alerts) do
+            if state.def.category == cat and JR.iconFrames[key] then
+                JR.iconFrames[key]:EnableMouse(locked)
+            end
+        end
+    else
+        anchor:SetSize(300, 120)
+        anchor:EnableMouse(not locked)
+    end
+
+    if locked then
+        anchorBGs[cat]:Hide()
+        anchorLbls[cat]:Hide()
+    else
+        anchorBGs[cat]:Show()
+        anchorLbls[cat]:Show()
+    end
+end
+
+local function ApplyLockState()
+    for _, cat in ipairs(CATEGORIES) do
+        ApplyLockStateForCategory(cat)
+    end
+end
+JR.ApplyLockState = ApplyLockState
+
+-- ============================================================
+-- GLOW APPLICATION
+-- ============================================================
+local function ApplyGlow(btn, glowType)
+    if glowType == "action" then
+        GlowAction_Show(btn)
+        Ants_Hide(btn._ants)
+    elseif glowType == "ants" then
+        GlowAction_Hide(btn)
+        Ants_Show(btn._ants)
+    else
+        GlowAction_Hide(btn)
+        Ants_Hide(btn._ants)
+    end
+end
+
+local function ClearGlow(btn)
+    GlowAction_Hide(btn)
+    Ants_Hide(btn._ants)
+end
+
+-- ============================================================
+-- ACTIVATE / DEACTIVATE
+-- ============================================================
+local function ActivateAlert(key, auraData)
+    local state = JR.alerts[key]
+    if not state or state.active then return end
+    local cfg = AlertCfg(key)
+    if cfg.enabled == false then return end
+
+    state.active   = true
+    state.auraData = auraData
+
+    local btn = JR.iconFrames[key]
+    if btn then
+        btn:Show()
+        ApplyGlow(btn, cfg.glowType or state.def.defaultGlow or "none")
+    end
+
+    TryPlaySound(key)
+    LayoutIcons()
+    LayoutTexts()
+end
+
+local function DeactivateAlert(key)
+    local state = JR.alerts[key]
+    if not state or not state.active then return end
+    state.active   = false
+    state.auraData = nil
+
+    local btn = JR.iconFrames[key]
+    if btn then btn:Hide(); ClearGlow(btn) end
+
+    LayoutIcons()
+    LayoutTexts()
+end
+
+-- ============================================================
+-- PUBLIC API — for class modules
+-- ============================================================
+
+-- Show/update a cooldown sweep on an icon (pass 0, 0 to clear)
+function JR:SetCooldownSweep(key, startTime, duration, modRate)
+    local btn = JR.iconFrames[key]
+    if btn then btn._cd:SetCooldown(startTime or 0, duration or 0, modRate or 1) end
+end
+
+-- Set or hide the small BOTTOMRIGHT stack count badge on an icon
+function JR:SetBadge(key, count)
+    local btn = JR.iconFrames[key]
+    if not btn then return end
+    if count and count > 0 then
+        btn._badge:SetText(tostring(count))
+        btn._badge:Show()
+    else
+        btn._badge:Hide()
+    end
+end
+
+-- Show or hide the full-icon color overlay.
+-- Pass r,g,b,a to tint; pass a=0 to hide.
+function JR:SetIconOverlay(key, r, g, b, a)
+    local btn = JR.iconFrames[key]
+    if not btn then return end
+    if not a or a <= 0 then
+        btn._overlay:Hide()
+    else
+        btn._overlay:SetColorTexture(r or 1, g or 0, b or 0, a)
+        btn._overlay:Show()
+    end
+end
+
+-- Update glow on an already-active icon without a full re-activate
+function JR:UpdateGlow(key, glowType)
+    local btn = JR.iconFrames[key]
+    if not btn then return end
+    ApplyGlow(btn, glowType)
+end
+
+-- Show a large centered stack count on an icon, colored r,g,b.
+-- Pass count=0 or nil to hide.
+function JR:SetBigCount(key, count, r, g, b)
+    local btn = JR.iconFrames[key]
+    if not btn then return end
+    if count and count > 0 then
+        btn._bigCount:SetText(tostring(count))
+        btn._bigCount:SetTextColor(r or 1, g or 1, b or 1)
+        btn._bigCount:Show()
+    else
+        btn._bigCount:Hide()
+    end
+end
+
+-- Expose TryPlaySound for alerts that manage their own sound timing
+-- (e.g. always-visible trackers that fire on a state transition)
+function JR:PlayAlertSound(key)
+    TryPlaySound(key)
+end
+
+-- Aura-based alert: isActive=true shows, false hides
+function JR:HandleAuraChange(key, isActive, auraData)
+    if isActive then ActivateAlert(key, auraData) else DeactivateAlert(key) end
+end
+
+-- Cooldown-based alert: isReady=true shows the icon (spell off CD)
+function JR:HandleCooldownChange(key, isReady, startTime, duration, modRate)
+    JR:SetCooldownSweep(key, startTime, duration, modRate)
+    if isReady then ActivateAlert(key, nil) else DeactivateAlert(key) end
+end
+
+-- ============================================================
+-- REGISTER ALERT DEF  (class files call this at load time)
+-- Frame construction is deferred until ADDON_LOADED so DB is available.
+-- ============================================================
+function JR:RegisterAlert(def)
+    JR.alerts[def.key] = { def = def, active = false }
+    if JouicyRemindersDB then
+        -- DB already ready (e.g. after /reload): build now
+        BuildIconFrame(def)
+        BuildTextFrame(def)
+    else
+        JR._pendingAlerts[#JR._pendingAlerts + 1] = def
+    end
+end
+
+-- Register a spec: { classFilename, specID, alertKeys }
+-- classFilename = UnitClassBase result: "DRUID", "PRIEST", "SHAMAN", etc.
+function JR:RegisterClassSpec(spec)
+    local k = spec.classFilename .. "_" .. spec.specID
+    JR.classDefs[k] = spec
+end
+
+-- ============================================================
+-- SPEC DETECTION
+-- UnitClassBase("player") is locale-independent. Returns "DRUID" etc.
+-- ============================================================
+local function GetSpecKey()
+    local idx = GetSpecialization and GetSpecialization()
+    if not idx then return nil end
+    local specID = select(1, GetSpecializationInfo(idx))
+    if not specID then return nil end
+    local cls = UnitClassBase("player")
+    if not cls then return nil end
+    return cls .. "_" .. specID
+end
+
+local function OnSpecActivated()
+    for key in pairs(JR.alerts) do DeactivateAlert(key) end
+    local spec = JR.classDefs[GetSpecKey() or ""]
+    if not spec then return end
+    for _, key in ipairs(spec.alertKeys) do
+        local s = JR.alerts[key]
+        if s and s.def.onSpecActivated then s.def.onSpecActivated() end
+    end
+end
+
+-- ============================================================
+-- LAYOUT REFRESH  (called after config changes)
+-- ============================================================
+function JR:RefreshLayout()
+    for _, cat in ipairs(ICON_CATEGORIES) do
+        local size = AnchorCfg(cat).iconSize or 48
+        for key, state in pairs(JR.alerts) do
+            if state.def.category == cat and JR.iconFrames[key] then
+                JR.iconFrames[key]:SetSize(size, size)
+            end
+        end
+    end
+    UpdateAnchors()
+    ApplyLockState()
+    LayoutIcons()
+    LayoutTexts()
+end
+
+-- ============================================================
+-- DB INIT  (deep-copy defaults on first load / new keys)
+-- ============================================================
+local function InitDB()
+    JouicyRemindersDB = JouicyRemindersDB or {}
+    local db = JouicyRemindersDB
+    db.anchors = db.anchors or {}
+    db.alerts  = db.alerts  or {}
+
+    for cat, defaults in pairs(ANCHOR_DEFAULTS) do
+        db.anchors[cat] = db.anchors[cat] or {}
+        for k, v in pairs(defaults) do
+            if db.anchors[cat][k] == nil then
+                db.anchors[cat][k] = v
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- MAIN EVENT FRAME
+-- ============================================================
+local ef = CreateFrame("Frame")
+ef:RegisterEvent("ADDON_LOADED")
+ef:RegisterEvent("PLAYER_ENTERING_WORLD")
+ef:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+ef:RegisterEvent("PLAYER_TALENT_UPDATE")   -- fires when talents are committed
+ef:RegisterEvent("UNIT_AURA")
+ef:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+
+ef:SetScript("OnEvent", function(self, event, ...)
+    if event == "ADDON_LOADED" then
+        local name = ...
+        if name ~= AddonName then return end
+
+        InitDB()
+
+        -- Build frames for all alerts registered before ADDON_LOADED
+        for _, def in ipairs(JR._pendingAlerts) do
+            BuildIconFrame(def)
+            BuildTextFrame(def)
+        end
+        JR._pendingAlerts = {}
+
+        UpdateAnchors()
+        ApplyLockState()
+        self:UnregisterEvent("ADDON_LOADED")
+
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        OnSpecActivated()
+
+    elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
+        OnSpecActivated()
+
+    elseif event == "PLAYER_TALENT_UPDATE" then
+        -- Re-evaluate talent gates whenever the player commits a talent change.
+        OnSpecActivated()
+
+    elseif event == "UNIT_AURA" then
+        local unit, updateInfo = ...
+        if unit ~= "player" then return end
+        local spec = JR.classDefs[GetSpecKey() or ""]
+        if not spec then return end
+        for _, key in ipairs(spec.alertKeys) do
+            local s = JR.alerts[key]
+            if s and s.def.onAuraUpdate then s.def.onAuraUpdate(updateInfo) end
+        end
+
+    elseif event == "SPELL_UPDATE_COOLDOWN" then
+        local spec = JR.classDefs[GetSpecKey() or ""]
+        if not spec then return end
+        for _, key in ipairs(spec.alertKeys) do
+            local s = JR.alerts[key]
+            if s and s.def.onCooldownUpdate then s.def.onCooldownUpdate() end
+        end
+    end
+end)
+
+-- ============================================================
+-- SLASH COMMANDS
+--   /jr                → print usage
+--   /jr lock           → toggle lock all anchors
+--   /jr lock <cat>     → toggle lock for one anchor
+--   /jr reset          → reset all anchor positions to defaults
+--
+-- Valid <cat> values: cooldown, upkeep, rotational, text
+-- ============================================================
+local VALID_CATS = { cooldown = true, upkeep = true, rotational = true, text = true }
+
+SLASH_JOUICYREMINDERS1 = "/jr"
+SLASH_JOUICYREMINDERS2 = "/jouicy"
+SlashCmdList["JOUICYREMINDERS"] = function(msg)
+    local cmd, arg = strtrim(msg):lower():match("^(%S*)%s*(.-)$")
+
+    if cmd == "" then
+        print("|cff88aaff[Jouicy Reminders]|r Commands:")
+        print("  /jr lock [cat]  — toggle lock (cooldown/upkeep/rotational/text)")
+        print("  /jr reset       — reset all anchor positions")
+
+    elseif cmd == "lock" or cmd == "unlock" then
+        if arg ~= "" then
+            -- Lock/unlock a single category
+            if not VALID_CATS[arg] then
+                print("|cff88aaff[Jouicy Reminders]|r Unknown category: " .. arg)
+                print("  Valid: cooldown, upkeep, rotational, text")
+                return
+            end
+            local cfg  = AnchorCfg(arg)
+            cfg.locked = not cfg.locked
+            ApplyLockStateForCategory(arg)
+            local stateStr = cfg.locked and "|cffff4444locked|r" or "|cff44ff44unlocked|r"
+            print("|cff88aaff[Jouicy Reminders]|r " .. arg .. " anchor " .. stateStr)
+        else
+            -- Toggle all anchors together (majority vote: lock if any is unlocked)
+            local anyUnlocked = false
+            for _, cat in ipairs(CATEGORIES) do
+                if not AnchorCfg(cat).locked then anyUnlocked = true; break end
+            end
+            local newLocked = anyUnlocked
+            for _, cat in ipairs(CATEGORIES) do
+                AnchorCfg(cat).locked = newLocked
+            end
+            ApplyLockState()
+            local stateStr = newLocked and "|cffff4444locked|r" or "|cff44ff44unlocked|r"
+            print("|cff88aaff[Jouicy Reminders]|r All anchors " .. stateStr ..
+                  (not newLocked and " — drag to reposition, /jr lock when done." or "."))
+        end
+
+    elseif cmd == "reset" then
+        for cat, defaults in pairs(ANCHOR_DEFAULTS) do
+            local cfg = AnchorCfg(cat)
+            cfg.x = defaults.x
+            cfg.y = defaults.y
+        end
+        UpdateAnchors()
+        print("|cff88aaff[Jouicy Reminders]|r All anchor positions reset.")
+
+    else
+        print("|cff88aaff[Jouicy Reminders]|r Unknown command. Usage: /jr lock [cat] | /jr reset")
+    end
+end

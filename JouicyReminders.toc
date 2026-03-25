@@ -1,0 +1,9 @@
+## Interface: 120001
+## Title: Jouicy Reminders
+## Notes: Cooldown, upkeep, and rotational alert tracker for healers
+## Author: Evans
+## Version: 1.0
+## SavedVariables: JouicyRemindersDB
+
+JouicyReminders.lua
+Classes/RestoDruid.lua

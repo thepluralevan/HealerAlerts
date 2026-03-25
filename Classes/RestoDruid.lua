@@ -1,21 +1,20 @@
 -- Classes/RestoDruid.lua
 -- Restoration Druid (specID 105) alert definitions
 --
--- ┌──────────────────────┬──────────┬────────────────────────────────────────────────┐
--- │ Alert                │ SpellID  │ Trigger                                        │
--- ├──────────────────────┼──────────┼────────────────────────────────────────────────┤
--- │ Lifebloom            │ 33763    │ Alert when MISSING or < 4.5s remaining         │
--- │ Swiftmend            │ 18562    │ Alert when OFF cooldown (ready to cast)         │
--- │ Wild Growth          │ 48438    │ Alert when OFF cooldown (ready to cast)         │
--- │ Abundance            │ 207383   │ Always shown; badge shows current stack count   │
--- │                      │(buff 207640)│ talent ID ≠ buff ID — icon uses 207383,    │
--- │                      │          │ aura query uses 207640                          │
--- │ Convoke the Spirits  │ 391528   │ Ready when OFF CD. TALENT-GATED (IsPlayerSpell)│
--- │                      │          │ Mutually exclusive with Incarnation             │
--- │ Tranquility          │ 740      │ Ready when OFF CD. TALENT-GATED (IsPlayerSpell)│
--- │ Incarnation: ToL     │ 33891    │ Ready when OFF CD. TALENT-GATED (IsPlayerSpell)│
--- │                      │          │ Mutually exclusive with Convoke                 │
--- └──────────────────────┴──────────┴────────────────────────────────────────────────┘
+-- ┌──────────────────────┬──────────┬───────────┬────────────────────────────────────┐
+-- │ Alert                │ SpellID  │ Category  │ Trigger                            │
+-- ├──────────────────────┼──────────┼───────────┼────────────────────────────────────┤
+-- │ Lifebloom            │ 33763    │ cooldown  │ MISSING or < 4.5s remaining        │
+-- │ Swiftmend            │ 18562    │ cooldown  │ OFF cooldown                        │
+-- │ Wild Growth          │ 48438    │ cooldown  │ OFF cooldown                        │
+-- │ Abundance            │ 207383   │ upkeep    │ Always shown; icon shows stack cnt  │
+-- │                      │(buff 207640)│        │ talent ID ≠ buff ID                │
+-- │ Convoke the Spirits  │ 391528   │ cooldown  │ OFF CD. TALENT-GATED               │
+-- │                      │          │           │ Mutually exclusive with Incarnation │
+-- │ Tranquility          │ 740      │ cooldown  │ OFF CD. TALENT-GATED               │
+-- │ Incarnation: ToL     │ 33891    │ cooldown  │ OFF CD. TALENT-GATED               │
+-- │                      │          │           │ Mutually exclusive with Convoke     │
+-- └──────────────────────┴──────────┴───────────┴────────────────────────────────────┘
 --
 -- API used:
 --   C_UnitAuras.GetPlayerAuraBySpellID(spellID) → AuraData?
@@ -28,7 +27,7 @@
 --     SpellCooldownInfo.isEnabled   bool     false when spell is "active" (e.g. form)
 --     SpellCooldownInfo.modRate     number   haste modifier on the CD timer
 
-local AddonName, HA = ...
+local AddonName, JR = ...
 
 local CLASS_FILENAME = "DRUID"   -- UnitClassBase("player") return value
 local SPEC_ID        = 105       -- Restoration
@@ -111,19 +110,20 @@ local function LB_Check()
         dur   = aura.duration
     end
 
-    HA:HandleAuraChange("lifebloom", alert, aura)
+    JR:HandleAuraChange("lifebloom", alert, aura)
     -- Always update the sweep so the timer is visible even when alert is inactive
-    HA:SetCooldownSweep("lifebloom", start, dur, 1)
+    JR:SetCooldownSweep("lifebloom", start, dur, 1)
 end
 
 local lifeblosomDef = {
     key          = "lifebloom",
     name         = "Lifebloom",
     spellID      = SPELL_LIFEBLOOM,
+    category     = "cooldown",
     type         = "aura",
     order        = 1,
     defaultGlow  = "ants",
-    defaultText  = "Lifebloom expiring!",
+    defaultText  = "Lifebloom expiring!",   -- explicit override; template would say "Lifebloom is ready!"
     defaultSound = "lifebloom_expiring.ogg",
 
     onSpecActivated = LB_Check,
@@ -163,17 +163,18 @@ local function SM_Check()
     local start = (not ready and cd) and cd.startTime or 0
     local dur   = (not ready and cd) and cd.duration  or 0
     local mod   = cd and cd.modRate or 1
-    HA:HandleCooldownChange("swiftmend", ready, start, dur, mod)
+    JR:HandleCooldownChange("swiftmend", ready, start, dur, mod)
 end
 
 local swiftmendDef = {
     key          = "swiftmend",
     name         = "Swiftmend",
     spellID      = SPELL_SWIFTMEND,
+    category     = "cooldown",
     type         = "cooldown",
     order        = 2,
     defaultGlow  = "action",
-    defaultText  = "Swiftmend ready!",
+    -- defaultText omitted → category template: "Swiftmend is ready!"
     defaultSound = "swiftmend_ready.ogg",
 
     onSpecActivated  = SM_Check,
@@ -190,17 +191,18 @@ local function WG_Check()
     local start = (not ready and cd) and cd.startTime or 0
     local dur   = (not ready and cd) and cd.duration  or 0
     local mod   = cd and cd.modRate or 1
-    HA:HandleCooldownChange("wildgrowth", ready, start, dur, mod)
+    JR:HandleCooldownChange("wildgrowth", ready, start, dur, mod)
 end
 
 local wildGrowthDef = {
     key          = "wildgrowth",
     name         = "Wild Growth",
     spellID      = SPELL_WILDGROWTH,
+    category     = "cooldown",
     type         = "cooldown",
     order        = 3,
     defaultGlow  = "action",
-    defaultText  = "Wild Growth ready!",
+    -- defaultText omitted → category template: "Wild Growth is ready!"
     defaultSound = "wildgrowth_ready.ogg",
 
     onSpecActivated  = WG_Check,
@@ -230,25 +232,25 @@ local function AB_Check()
     -- HandleAuraChange with isActive=true activates on first call;
     -- subsequent calls return early from ActivateAlert but we still
     -- update glow / overlay / count below.
-    HA:HandleAuraChange("abundance", true, aura)
+    JR:HandleAuraChange("abundance", true, aura)
 
     if not aura then
         -- Play the "missing" sound only on the present→absent transition, not
         -- every UNIT_AURA tick while the buff remains absent.
         if abundanceWasPresent then
-            HA:PlayAlertSound("abundance")
+            JR:PlayAlertSound("abundance")
         end
         abundanceWasPresent = false
 
         -- Buff missing: red tint + marching ants warning
-        HA:SetIconOverlay("abundance", 0.9, 0.1, 0.1, 0.5)
-        HA:UpdateGlow("abundance", "ants")
-        HA:SetBigCount("abundance", 0)
+        JR:SetIconOverlay("abundance", 0.9, 0.1, 0.1, 0.5)
+        JR:UpdateGlow("abundance", "ants")
+        JR:SetBigCount("abundance", 0)
     else
         abundanceWasPresent = true
         -- Buff present: clear overlay + color-coded stack count
-        HA:SetIconOverlay("abundance", 0, 0, 0, 0)
-        HA:UpdateGlow("abundance", "none")
+        JR:SetIconOverlay("abundance", 0, 0, 0, 0)
+        JR:UpdateGlow("abundance", "none")
         local r, g, b
         if count > 10 then
             r, g, b = 0.1, 1.0, 0.1   -- green
@@ -257,7 +259,7 @@ local function AB_Check()
         else
             r, g, b = 1.0, 0.55, 0.1  -- orange
         end
-        HA:SetBigCount("abundance", count, r, g, b)
+        JR:SetBigCount("abundance", count, r, g, b)
     end
 end
 
@@ -265,10 +267,11 @@ local abundanceDef = {
     key          = "abundance",
     name         = "Abundance",
     spellID      = SPELL_ABUNDANCE,
+    category     = "upkeep",
     type         = "aura_count",
     order        = 4,
     defaultGlow  = "none",   -- AB_Check drives glow via UpdateGlow immediately after
-    defaultText  = "",
+    defaultText  = "",       -- suppress text; icon communicates state visually
     defaultSound = "abundance_missing.ogg",
 
     onSpecActivated = AB_Check,
@@ -297,7 +300,7 @@ local abundanceDef = {
 local function CV_Check()
     if not IsKnown(SPELL_CONVOKE) then
         -- Talent not taken: ensure the icon stays hidden and return.
-        HA:HandleCooldownChange("convoke", false, 0, 0, 1)
+        JR:HandleCooldownChange("convoke", false, 0, 0, 1)
         return
     end
     local cd    = GetCD(SPELL_CONVOKE)
@@ -305,17 +308,18 @@ local function CV_Check()
     local start = (not ready and cd) and cd.startTime or 0
     local dur   = (not ready and cd) and cd.duration  or 0
     local mod   = cd and cd.modRate or 1
-    HA:HandleCooldownChange("convoke", ready, start, dur, mod)
+    JR:HandleCooldownChange("convoke", ready, start, dur, mod)
 end
 
 local convokeDef = {
     key          = "convoke",
     name         = "Convoke the Spirits",
     spellID      = SPELL_CONVOKE,
+    category     = "cooldown",
     type         = "cooldown",
     order        = 5,
     defaultGlow  = "action",
-    defaultText  = "Convoke ready!",
+    -- defaultText omitted → category template: "Convoke the Spirits is ready!"
     defaultSound = "convoke_ready.ogg",
 
     onSpecActivated  = CV_Check,
@@ -329,7 +333,7 @@ local convokeDef = {
 -- ============================================================
 local function TQ_Check()
     if not IsKnown(SPELL_TRANQUILITY) then
-        HA:HandleCooldownChange("tranquility", false, 0, 0, 1)
+        JR:HandleCooldownChange("tranquility", false, 0, 0, 1)
         return
     end
     local cd    = GetCD(SPELL_TRANQUILITY)
@@ -337,17 +341,18 @@ local function TQ_Check()
     local start = (not ready and cd) and cd.startTime or 0
     local dur   = (not ready and cd) and cd.duration  or 0
     local mod   = cd and cd.modRate or 1
-    HA:HandleCooldownChange("tranquility", ready, start, dur, mod)
+    JR:HandleCooldownChange("tranquility", ready, start, dur, mod)
 end
 
 local tranquilityDef = {
     key          = "tranquility",
     name         = "Tranquility",
     spellID      = SPELL_TRANQUILITY,
+    category     = "cooldown",
     type         = "cooldown",
     order        = 6,
     defaultGlow  = "action",
-    defaultText  = "Tranquility ready!",
+    -- defaultText omitted → category template: "Tranquility is ready!"
     defaultSound = "tranquility_ready.ogg",
 
     onSpecActivated  = TQ_Check,
@@ -362,7 +367,7 @@ local tranquilityDef = {
 -- ============================================================
 local function IT_Check()
     if not IsKnown(SPELL_INCARNATION) then
-        HA:HandleCooldownChange("incarnation", false, 0, 0, 1)
+        JR:HandleCooldownChange("incarnation", false, 0, 0, 1)
         return
     end
     local cd    = GetCD(SPELL_INCARNATION)
@@ -370,17 +375,18 @@ local function IT_Check()
     local start = (not ready and cd) and cd.startTime or 0
     local dur   = (not ready and cd) and cd.duration  or 0
     local mod   = cd and cd.modRate or 1
-    HA:HandleCooldownChange("incarnation", ready, start, dur, mod)
+    JR:HandleCooldownChange("incarnation", ready, start, dur, mod)
 end
 
 local incarnationDef = {
     key          = "incarnation",
     name         = "Incarnation: Tree of Life",
     spellID      = SPELL_INCARNATION,
+    category     = "cooldown",
     type         = "cooldown",
     order        = 5,   -- same slot as Convoke; they are mutually exclusive talents
     defaultGlow  = "action",
-    defaultText  = "Incarnation ready!",
+    -- defaultText omitted → category template: "Incarnation: Tree of Life is ready!"
     defaultSound = "incarnation_ready.ogg",
 
     onSpecActivated  = IT_Check,
@@ -391,15 +397,15 @@ local incarnationDef = {
 -- ============================================================
 -- REGISTER
 -- ============================================================
-HA:RegisterAlert(lifeblosomDef)
-HA:RegisterAlert(swiftmendDef)
-HA:RegisterAlert(wildGrowthDef)
-HA:RegisterAlert(abundanceDef)
-HA:RegisterAlert(convokeDef)
-HA:RegisterAlert(tranquilityDef)
-HA:RegisterAlert(incarnationDef)
+JR:RegisterAlert(lifeblosomDef)
+JR:RegisterAlert(swiftmendDef)
+JR:RegisterAlert(wildGrowthDef)
+JR:RegisterAlert(abundanceDef)
+JR:RegisterAlert(convokeDef)
+JR:RegisterAlert(tranquilityDef)
+JR:RegisterAlert(incarnationDef)
 
-HA:RegisterClassSpec({
+JR:RegisterClassSpec({
     classFilename = CLASS_FILENAME,
     specID        = SPEC_ID,
     alertKeys     = {
