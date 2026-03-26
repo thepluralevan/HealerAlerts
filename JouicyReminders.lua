@@ -254,12 +254,54 @@ local function SlotToBindingCmd(slot)
     return nil
 end
 
+-- Returns true if the macro at macroIndex casts/shows the spell with spellID.
+--
+-- Two-path approach:
+--   1. GetMacroSpell(index) – fast legacy C function; works for most macros but
+--      returns nil for bare "#showtooltip" + "[@condition] SpellName" macros
+--      because WoW cannot resolve the target at scan time.
+--   2. GetMacroBody fallback – reads the raw macro text, strips conditional
+--      blocks like [@mouseover], and compares the remaining spell name
+--      case-insensitively against C_Spell.GetSpellInfo(spellID).name.
+local function MacroCastsSpell(macroIndex, spellID)
+    -- Path 1: fast check via GetMacroSpell (pre-docs legacy C function).
+    local macroSID = GetMacroSpell(macroIndex)
+    if macroSID == spellID then return true end
+
+    -- Path 2: parse the macro body text.
+    local body = GetMacroBody(macroIndex)
+    if not body then return false end
+
+    local info = C_Spell.GetSpellInfo(spellID)
+    local wantName = info and info.name
+    if not wantName then return false end
+    wantName = wantName:lower()
+
+    for line in body:gmatch("[^\n]+") do
+        -- Match /cast and /use lines (the two cast commands healers use).
+        local castArgs = line:match("^%s*/cast%s+(.+)")
+                      or line:match("^%s*/use%s+(.+)")
+        if castArgs then
+            -- Strip all conditional blocks: [@mouseover], [mod:shift], etc.
+            -- %b[] matches a balanced [...] pair.
+            local noConditions = castArgs:gsub("%b[]%s*", "")
+            -- Handle semicolon-separated fallback chains: "Spell1; Spell2"
+            for part in noConditions:gmatch("[^;]+") do
+                local trimmed = part:match("^%s*(.-)%s*$")
+                if trimmed and trimmed:lower() == wantName then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
 -- Returns a short display string for the first keybind found for spellID,
 -- or nil if the spell is not on any action bar or has no binding.
--- Handles both direct spell placements and macros that show/cast the spell
--- (e.g. mouseover macros with #showtooltip <SpellName>).
--- Scans slots 1→108 (bar 1 first) and returns on the first slot that both
--- matches the spell AND has a keybind assigned.
+-- Handles direct spell placements and macros (including bare #showtooltip
+-- with [@mouseover] conditional casts).
+-- Scans slots 1→108 (bar 1 first) so bar 1 always wins over bar 2, etc.
 -- Key modifiers are shortened: CTRL- → ^ SHIFT- → + ALT- → A-
 local function GetSpellKeybind(spellID)
     if not spellID then return nil end
@@ -269,12 +311,7 @@ local function GetSpellKeybind(spellID)
         if actionType == "spell" and id == spellID then
             matches = true
         elseif actionType == "macro" and id then
-            -- GetMacroSpell returns the spellID that the macro targets
-            -- (from #showtooltip or /cast lines), so mouseover macros work.
-            local macroSpellID = GetMacroSpell(id)
-            if macroSpellID == spellID then
-                matches = true
-            end
+            matches = MacroCastsSpell(id, spellID)
         end
         if matches then
             local cmd = SlotToBindingCmd(slot)
