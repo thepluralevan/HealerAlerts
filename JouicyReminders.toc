@@ -6,4 +6,5 @@
 ## SavedVariables: JouicyRemindersDB
 
 JouicyReminders.lua
+JouicyReminders_Config.lua
 Classes/RestoDruid.lua

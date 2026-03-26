@@ -23,7 +23,8 @@ local ICON_CATEGORIES = { "cooldown", "upkeep", "rotational" }
 
 -- Default config for each anchor (x/y = BOTTOMLEFT offset from UIParent origin)
 local ANCHOR_DEFAULTS = {
-    cooldown   = { x = 400, y = 300, locked = false, iconSize = 48, growDirection = "RIGHT" },
+    cooldown   = { x = 400, y = 300, locked = false, iconSize = 48, growDirection = "RIGHT",
+                   showKeybinds = false, keybindFontSize = 12 },
     upkeep     = { x = 400, y = 240, locked = false, iconSize = 48, growDirection = "RIGHT" },
     rotational = { x = 600, y = 300, locked = false, iconSize = 48, growDirection = "RIGHT" },
     text       = { x = 400, y = 180, locked = false },
@@ -217,6 +218,116 @@ local function TryPlaySound(key)
 end
 
 -- ============================================================
+-- KEYBIND HELPERS
+-- Maps an action slot number → the WoW binding command string so we can call
+-- GetBindingKey(cmd) to find the player's actual key assignment.
+--
+-- Slot layout (all live in the game's flat 1-180 slot namespace):
+--   1-12   Main action bar   (ActionButton1-12)
+--   13-24  Multi-bar 1 BL    (MultiActionBar1Button1-12)
+--   25-36  Multi-bar 2 BR    (MultiActionBar2Button1-12)
+--   37-48  Multi-bar 3 Right (MultiActionBar3Button1-12)
+--   49-60  Multi-bar 4 Left  (MultiActionBar4Button1-12)
+--   61-72  Multi-bar 5       (MultiActionBar5Button1-12)
+--   73-84  Multi-bar 6       (MultiActionBar6Button1-12)
+--   85-96  Multi-bar 7       (MultiActionBar7Button1-12)
+--   97-108 Multi-bar 8       (MultiActionBar8Button1-12)
+-- ============================================================
+local SLOT_RANGES = {
+    { 1,   12,  "ACTIONBUTTON",        0  },
+    { 13,  24,  "MULTIACTIONBAR1BUTTON", 12 },
+    { 25,  36,  "MULTIACTIONBAR2BUTTON", 24 },
+    { 37,  48,  "MULTIACTIONBAR3BUTTON", 36 },
+    { 49,  60,  "MULTIACTIONBAR4BUTTON", 48 },
+    { 61,  72,  "MULTIACTIONBAR5BUTTON", 60 },
+    { 73,  84,  "MULTIACTIONBAR6BUTTON", 72 },
+    { 85,  96,  "MULTIACTIONBAR7BUTTON", 84 },
+    { 97,  108, "MULTIACTIONBAR8BUTTON", 96 },
+}
+
+local function SlotToBindingCmd(slot)
+    for _, r in ipairs(SLOT_RANGES) do
+        if slot >= r[1] and slot <= r[2] then
+            return r[3] .. (slot - r[4])
+        end
+    end
+    return nil
+end
+
+-- Returns a short display string for the first keybind found for spellID,
+-- or nil if the spell is not on any action bar or has no binding.
+-- Handles both direct spell placements and macros that show/cast the spell
+-- (e.g. mouseover macros with #showtooltip <SpellName>).
+-- Scans slots 1→108 (bar 1 first) and returns on the first slot that both
+-- matches the spell AND has a keybind assigned.
+-- Key modifiers are shortened: CTRL- → ^ SHIFT- → + ALT- → A-
+local function GetSpellKeybind(spellID)
+    if not spellID then return nil end
+    for slot = 1, 108 do
+        local actionType, id = GetActionInfo(slot)
+        local matches = false
+        if actionType == "spell" and id == spellID then
+            matches = true
+        elseif actionType == "macro" and id then
+            -- GetMacroSpell returns the spellID that the macro targets
+            -- (from #showtooltip or /cast lines), so mouseover macros work.
+            local macroSpellID = GetMacroSpell(id)
+            if macroSpellID == spellID then
+                matches = true
+            end
+        end
+        if matches then
+            local cmd = SlotToBindingCmd(slot)
+            if cmd then
+                local key = GetBindingKey(cmd)
+                if key and key ~= "" then
+                    key = key:gsub("CTRL%-",  "^")
+                             :gsub("SHIFT%-", "+")
+                             :gsub("ALT%-",   "A-")
+                    return key
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Refresh the keybind label on a single icon.
+local function UpdateKeybindLabel(key)
+    local state = JR.alerts[key]
+    local btn   = JR.iconFrames[key]
+    if not state or not btn or not btn._keybind then return end
+
+    local cfg  = AnchorCfg("cooldown")
+    local show = cfg.showKeybinds
+    if not show then
+        btn._keybind:Hide()
+        return
+    end
+
+    local fontSize = cfg.keybindFontSize or 12
+    btn._keybind:SetFont("Fonts\\FRIZQT__.TTF", fontSize, "OUTLINE")
+
+    local kb = GetSpellKeybind(state.def.spellID)
+    if kb then
+        btn._keybind:SetText(kb)
+        btn._keybind:Show()
+    else
+        btn._keybind:Hide()
+    end
+end
+
+-- Refresh all cooldown icon keybind labels.
+local function UpdateAllKeybinds()
+    for key, state in pairs(JR.alerts) do
+        if state.def.category == "cooldown" then
+            UpdateKeybindLabel(key)
+        end
+    end
+end
+JR.UpdateAllKeybinds = UpdateAllKeybinds   -- expose for config UI
+
+-- ============================================================
 -- ICON FRAME BUILDER  (called after DB is ready)
 -- Parented to the anchor frame for the alert's category.
 -- ============================================================
@@ -265,6 +376,17 @@ local function BuildIconFrame(def)
     bigCount:SetPoint("CENTER", btn, "CENTER", 0, 0)
     bigCount:Hide()
     btn._bigCount = bigCount
+
+    -- Keybind label — upper-right corner, cooldown category only.
+    -- Shown/hidden and sized by UpdateKeybindLabel(); nil on non-cooldown icons.
+    if cat == "cooldown" then
+        local kb = btn:CreateFontString(nil, "OVERLAY")
+        kb:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
+        kb:SetPoint("TOPRIGHT", btn, "TOPRIGHT", -2, -3)
+        kb:SetTextColor(1, 1, 1)
+        kb:Hide()
+        btn._keybind = kb
+    end
 
     -- Marching ants effect
     btn._ants = Ants_Build(btn)
@@ -627,6 +749,7 @@ local function OnSpecActivated()
         local s = JR.alerts[key]
         if s and s.def.onSpecActivated then s.def.onSpecActivated() end
     end
+    UpdateAllKeybinds()
 end
 
 -- ============================================================
@@ -645,6 +768,7 @@ function JR:RefreshLayout()
     ApplyLockState()
     LayoutIcons()
     LayoutTexts()
+    UpdateAllKeybinds()
 end
 
 -- ============================================================
@@ -676,6 +800,8 @@ ef:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 ef:RegisterEvent("PLAYER_TALENT_UPDATE")   -- fires when talents are committed
 ef:RegisterEvent("UNIT_AURA")
 ef:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+ef:RegisterEvent("UPDATE_BINDINGS")          -- player changed keybindings
+ef:RegisterEvent("ACTIONBAR_PAGE_CHANGED")   -- active bar page changed
 
 ef:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
@@ -693,6 +819,9 @@ ef:SetScript("OnEvent", function(self, event, ...)
 
         UpdateAnchors()
         ApplyLockState()
+        JR:BuildSettingsPanel()
+        -- Keybinds are read after PLAYER_ENTERING_WORLD when action bars are live,
+        -- so UpdateAllKeybinds() is called there via OnSpecActivated → RefreshLayout.
         self:UnregisterEvent("ADDON_LOADED")
 
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -722,6 +851,9 @@ ef:SetScript("OnEvent", function(self, event, ...)
             local s = JR.alerts[key]
             if s and s.def.onCooldownUpdate then s.def.onCooldownUpdate() end
         end
+
+    elseif event == "UPDATE_BINDINGS" or event == "ACTIONBAR_PAGE_CHANGED" then
+        UpdateAllKeybinds()
     end
 end)
 
@@ -741,10 +873,18 @@ SLASH_JOUICYREMINDERS2 = "/jouicy"
 SlashCmdList["JOUICYREMINDERS"] = function(msg)
     local cmd, arg = strtrim(msg):lower():match("^(%S*)%s*(.-)$")
 
-    if cmd == "" then
+    if cmd == "" or cmd == "config" or cmd == "options" then
+        if JR._settingsCategory then
+            Settings.OpenToCategory(JR._settingsCategory)
+        else
+            print("|cff88aaff[Jouicy Reminders]|r Settings not yet loaded. Try after logging in.")
+        end
+
+    elseif cmd == "help" then
         print("|cff88aaff[Jouicy Reminders]|r Commands:")
-        print("  /jr lock [cat]  — toggle lock (cooldown/upkeep/rotational/text)")
-        print("  /jr reset       — reset all anchor positions")
+        print("  /jr (or /jr config) — open settings panel")
+        print("  /jr lock [cat]      — toggle lock (cooldown/upkeep/rotational/text)")
+        print("  /jr reset           — reset all anchor positions")
 
     elseif cmd == "lock" or cmd == "unlock" then
         if arg ~= "" then
