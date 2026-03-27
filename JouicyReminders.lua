@@ -234,15 +234,24 @@ end
 --   97-108 Multi-bar 8       (MultiActionBar8Button1-12)
 -- ============================================================
 local SLOT_RANGES = {
-    { 1,   12,  "ACTIONBUTTON",        0  },
-    { 13,  24,  "MULTIACTIONBAR1BUTTON", 12 },
-    { 25,  36,  "MULTIACTIONBAR2BUTTON", 24 },
-    { 37,  48,  "MULTIACTIONBAR3BUTTON", 36 },
-    { 49,  60,  "MULTIACTIONBAR4BUTTON", 48 },
-    { 61,  72,  "MULTIACTIONBAR5BUTTON", 60 },
-    { 73,  84,  "MULTIACTIONBAR6BUTTON", 72 },
-    { 85,  96,  "MULTIACTIONBAR7BUTTON", 84 },
-    { 97,  108, "MULTIACTIONBAR8BUTTON", 96 },
+    { 1,   12,  "ACTIONBUTTON",           0   },
+    { 13,  24,  "MULTIACTIONBAR1BUTTON",  12  },
+    { 25,  36,  "MULTIACTIONBAR2BUTTON",  24  },
+    { 37,  48,  "MULTIACTIONBAR3BUTTON",  36  },
+    { 49,  60,  "MULTIACTIONBAR4BUTTON",  48  },
+    { 61,  72,  "MULTIACTIONBAR5BUTTON",  60  },
+    { 73,  84,  "MULTIACTIONBAR6BUTTON",  72  },
+    { 85,  96,  "MULTIACTIONBAR7BUTTON",  84  },
+    { 97,  108, "MULTIACTIONBAR8BUTTON",  96  },
+    -- Extra ranges for TWW expanded bar layout.  Binding command names
+    -- beyond MULTIACTIONBAR8BUTTON may not exist in all builds; if
+    -- GetBindingKey returns nil for them that is fine — the slot is still
+    -- visited so the texture / spellID match can succeed, and the binding
+    -- is reported as unbound rather than silently skipped.
+    { 109, 120, "MULTIACTIONBAR9BUTTON",  108 },
+    { 121, 132, "MULTIACTIONBAR10BUTTON", 120 },
+    { 133, 144, "MULTIACTIONBAR11BUTTON", 132 },
+    { 145, 156, "MULTIACTIONBAR12BUTTON", 144 },
 }
 
 local function SlotToBindingCmd(slot)
@@ -254,22 +263,57 @@ local function SlotToBindingCmd(slot)
     return nil
 end
 
+-- Ordered list of Blizzard default action bar button frame name prefixes.
+-- Derived from a working production addon (CooldownManagerCentered).
+-- Reading .action (slot number) and .commandName (binding target) directly
+-- from the frame is authoritative — the frame knows its own slot and binding
+-- regardless of what our static SLOT_RANGES table says.
+local BLIZZARD_BAR_PREFIXES = {
+    "ActionButton",               -- Bar 1: main action bar
+    "MultiBarBottomLeftButton",   -- Bar 2
+    "MultiBarBottomRightButton",  -- Bar 3
+    "MultiBarRightButton",        -- Bar 4
+    "MultiBarLeftButton",         -- Bar 5
+    "MultiBar5Button",            -- Bar 6 (TWW)
+    "MultiBar6Button",            -- Bar 7 (TWW)
+    "MultiBar7Button",            -- Bar 8 (TWW)
+}
+
+-- Safe wrappers for legacy macro C functions that may not exist in all
+-- WoW versions.  We capture them once at load time so callers never need
+-- nil-guard boilerplate.
+local _GetMacroSpell = type(GetMacroSpell) == "function" and GetMacroSpell or nil
+local _GetMacroBody  = type(GetMacroBody)  == "function" and GetMacroBody  or nil
+local _GetMacroInfo  = type(GetMacroInfo)  == "function" and GetMacroInfo  or nil
+-- GetMacroInfo(index) → name, iconTexture, body   (pre-docs legacy global)
+
 -- Returns true if the macro at macroIndex casts/shows the spell with spellID.
 --
--- Two-path approach:
---   1. GetMacroSpell(index) – fast legacy C function; works for most macros but
---      returns nil for bare "#showtooltip" + "[@condition] SpellName" macros
---      because WoW cannot resolve the target at scan time.
---   2. GetMacroBody fallback – reads the raw macro text, strips conditional
---      blocks like [@mouseover], and compares the remaining spell name
---      case-insensitively against C_Spell.GetSpellInfo(spellID).name.
+-- Three-path approach (each path is guarded in case the API was removed):
+--   1. GetMacroSpell(index)        – instant; may be nil/removed in TWW
+--   2. GetMacroBody(index)         – reads raw text; may be nil/removed in TWW
+--   3. GetMacroInfo(index) body    – fallback body source if GetMacroBody gone
+-- Body parsing strips [@condition] blocks and compares spell name
+-- case-insensitively against C_Spell.GetSpellInfo(spellID).name.
 local function MacroCastsSpell(macroIndex, spellID)
-    -- Path 1: fast check via GetMacroSpell (pre-docs legacy C function).
-    local macroSID = GetMacroSpell(macroIndex)
-    if macroSID == spellID then return true end
+    -- Path 1: GetMacroSpell (fast; only works when WoW can resolve the spell
+    -- without a live target — bare #showtooltip macros return nil here).
+    if _GetMacroSpell then
+        local ok, macroSID = pcall(_GetMacroSpell, macroIndex)
+        if ok and macroSID == spellID then return true end
+    end
 
-    -- Path 2: parse the macro body text.
-    local body = GetMacroBody(macroIndex)
+    -- Path 2 & 3: get the raw macro body text.
+    local body
+    if _GetMacroBody then
+        local ok, b = pcall(_GetMacroBody, macroIndex)
+        if ok then body = b end
+    end
+    if not body and _GetMacroInfo then
+        -- GetMacroInfo returns: name, iconTexture, body
+        local ok, _, _, b = pcall(_GetMacroInfo, macroIndex)
+        if ok then body = b end
+    end
     if not body then return false end
 
     local info = C_Spell.GetSpellInfo(spellID)
@@ -278,7 +322,7 @@ local function MacroCastsSpell(macroIndex, spellID)
     wantName = wantName:lower()
 
     for line in body:gmatch("[^\n]+") do
-        -- Match /cast and /use lines (the two cast commands healers use).
+        -- Match /cast and /use lines.
         local castArgs = line:match("^%s*/cast%s+(.+)")
                       or line:match("^%s*/use%s+(.+)")
         if castArgs then
@@ -288,8 +332,12 @@ local function MacroCastsSpell(macroIndex, spellID)
             -- Handle semicolon-separated fallback chains: "Spell1; Spell2"
             for part in noConditions:gmatch("[^;]+") do
                 local trimmed = part:match("^%s*(.-)%s*$")
-                if trimmed and trimmed:lower() == wantName then
-                    return true
+                if trimmed then
+                    -- Strip WoW's "no-cancel" ! prefix (e.g. /cast !Tranquility)
+                    if trimmed:sub(1, 1) == "!" then trimmed = trimmed:sub(2) end
+                    if trimmed:lower() == wantName then
+                        return true
+                    end
                 end
             end
         end
@@ -299,33 +347,110 @@ end
 
 -- Returns a short display string for the first keybind found for spellID,
 -- or nil if the spell is not on any action bar or has no binding.
--- Handles direct spell placements and macros (including bare #showtooltip
--- with [@mouseover] conditional casts).
--- Scans slots 1→108 (bar 1 first) so bar 1 always wins over bar 2, etc.
--- Key modifiers are shortened: CTRL- → ^ SHIFT- → + ALT- → A-
+--
+-- TWW 10.2+ note: GetActionInfo returns THREE values for macro slots:
+--   actionType, id, subType
+--   subType = "spell"  →  id is the resolved spellID (reliable, direct match)
+--   subType = "item"   →  id is GARBAGE (== slot-1, WoWUIBugs #495).
+--                          For these we use GetActionText(slot) to get the
+--                          macro's title, then GetMacroSpell(title) — passing
+--                          a string name, not an index — which correctly
+--                          resolves the spell even for /cast !Tranquility etc.
+--   (no subType)       →  pre-10.2 / unknown; id treated as macro index.
+--
+-- Primary scan: Blizzard action bar button frames (bar 1 first).
+--   button.action      → actual slot number (authoritative)
+--   button.commandName → exact binding target string for GetBindingKey
+-- Fallback: SLOT_RANGES table scan for slots not in standard frames.
+-- Key modifiers are shortened: CTRL- → ^  SHIFT- → +  ALT- → A-
 local function GetSpellKeybind(spellID)
     if not spellID then return nil end
-    for slot = 1, 108 do
-        local actionType, id = GetActionInfo(slot)
+
+    -- Pre-fetch icon ID as last-resort texture fallback.
+    local spellInfoForIcon = C_Spell.GetSpellInfo(spellID)
+    local spellIconID      = spellInfoForIcon and spellInfoForIcon.iconID
+
+    -- Formats a raw binding key string into the short display form.
+    local function FormatKey(key)
+        if not key or key == "" then return nil end
+        return key:gsub("CTRL%-", "^"):gsub("SHIFT%-", "+"):gsub("ALT%-", "A-")
+    end
+
+    -- Returns a formatted key if slot/cmd resolve to spellID, else nil.
+    -- Implements the full TWW subType-aware matching strategy.
+    local function CheckSlot(slot, cmd)
+        if not slot or not cmd then return nil end
+        local actionType, id, subType = GetActionInfo(slot)
         local matches = false
+
         if actionType == "spell" and id == spellID then
             matches = true
-        elseif actionType == "macro" and id then
-            matches = MacroCastsSpell(id, spellID)
-        end
-        if matches then
-            local cmd = SlotToBindingCmd(slot)
-            if cmd then
-                local key = GetBindingKey(cmd)
-                if key and key ~= "" then
-                    key = key:gsub("CTRL%-",  "^")
-                             :gsub("SHIFT%-", "+")
-                             :gsub("ALT%-",   "A-")
-                    return key
+
+        elseif actionType == "macro" then
+            if subType == "spell" then
+                -- TWW direct: id is the resolved spellID.
+                matches = (id == spellID)
+
+            else
+                -- subType="item" (id is garbage) or no subType.
+                -- Strategy 1: GetMacroSpell(macroName) — pass the macro's
+                -- title as a string, which WoW resolves from the macro body.
+                -- This is how CooldownManagerCentered handles item macros and
+                -- avoids the garbage-id problem entirely.
+                local macroName = GetActionText and GetActionText(slot)
+                if macroName and macroName ~= "" and _GetMacroSpell then
+                    local ok, macroSID = pcall(_GetMacroSpell, macroName)
+                    if ok and macroSID == spellID then
+                        matches = true
+                    end
+                end
+
+                -- Strategy 2 (pre-TWW / no subType, numeric id available):
+                -- MacroCastsSpell body parse via the numeric macro index.
+                if not matches and (not subType) and id and id ~= 0 then
+                    matches = MacroCastsSpell(id, spellID)
+                end
+
+                -- Strategy 3: icon texture comparison (last resort).
+                if not matches and spellIconID then
+                    local tex = GetActionTexture and GetActionTexture(slot)
+                    if tex and tex == spellIconID then matches = true end
                 end
             end
         end
+
+        if matches then
+            return FormatKey(GetBindingKey(cmd))
+        end
+        return nil
     end
+
+    -- ── Primary scan: Blizzard action bar button frames ──────────────────
+    -- button.action gives the real slot; button.commandName gives the exact
+    -- binding target.  Both come from the frame itself, so they are always
+    -- correct regardless of page state or TWW UI changes.
+    for _, prefix in ipairs(BLIZZARD_BAR_PREFIXES) do
+        for btn = 1, 12 do
+            local button = _G[prefix .. btn]
+            if button then
+                local key = CheckSlot(button.action, button.commandName)
+                if key then return key end
+            end
+        end
+    end
+
+    -- ── Fallback: SLOT_RANGES scan ───────────────────────────────────────
+    -- Catches any slots not covered by the eight standard Blizzard bar
+    -- frames above (e.g. extra TWW bars, or addons that reuse slot numbers
+    -- outside the standard prefix naming).
+    for slot = 1, 156 do
+        local cmd = SlotToBindingCmd(slot)
+        if cmd then
+            local key = CheckSlot(slot, cmd)
+            if key then return key end
+        end
+    end
+
     return nil
 end
 
@@ -919,9 +1044,11 @@ SlashCmdList["JOUICYREMINDERS"] = function(msg)
 
     elseif cmd == "help" then
         print("|cff88aaff[Jouicy Reminders]|r Commands:")
-        print("  /jr (or /jr config) — open settings panel")
-        print("  /jr lock [cat]      — toggle lock (cooldown/upkeep/rotational/text)")
-        print("  /jr reset           — reset all anchor positions")
+        print("  /jr (or /jr config)    — open settings panel")
+        print("  /jr lock [cat]         — toggle lock (cooldown/upkeep/rotational/text)")
+        print("  /jr reset              — reset all anchor positions")
+        print("  /jr debug keybinds     — diagnose keybind detection per spell")
+        print("  /jr debug slot         — dump all non-empty action bar slots")
 
     elseif cmd == "lock" or cmd == "unlock" then
         if arg ~= "" then
@@ -961,7 +1088,239 @@ SlashCmdList["JOUICYREMINDERS"] = function(msg)
         UpdateAnchors()
         print("|cff88aaff[Jouicy Reminders]|r All anchor positions reset.")
 
+    elseif cmd == "debug" then
+        local sub = (arg ~= "" and arg or "keybinds")
+
+        if sub == "keybinds" then
+            -- ── /jr debug keybinds ──────────────────────────────────────────
+            -- For every registered cooldown alert, show: spellID, the first
+            -- matching bar slot found, how it matched (spell/macro), and
+            -- the resolved keybind (or why it's missing).
+            local P = "|cff88aaff[JR debug]|r "
+            print(P .. "=== Keybind scan for registered cooldown alerts ===")
+            local cfg = AnchorCfg("cooldown")
+            print(P .. "showKeybinds = " .. tostring(cfg.showKeybinds))
+
+            -- Helper: safe body fetch using whichever API exists.
+            local function SafeGetBody(macroIdx)
+                if _GetMacroBody then
+                    local ok, b = pcall(_GetMacroBody, macroIdx)
+                    if ok and b then return b end
+                end
+                if _GetMacroInfo then
+                    local ok, _, _, b = pcall(_GetMacroInfo, macroIdx)
+                    if ok and b then return b end
+                end
+                return nil
+            end
+
+            -- Inner helper: test a slot+cmd pair, return how-string or nil.
+            local function DebugCheckSlot(slot, cmd, sid, scanIcon, spellName)
+                if not slot or not cmd then return nil end
+                local aType, aID, aSub = GetActionInfo(slot)
+                if aType == "spell" and aID == sid then
+                    return "direct spell"
+                elseif aType == "macro" then
+                    if aSub == "spell" and aID == sid then
+                        return "macro subType=spell (id==spellID)"
+                    end
+                    -- For item-macros and any other subType: try name-based lookup.
+                    local macroName = GetActionText and GetActionText(slot)
+                    print(P .. "  [slot " .. slot .. " sub=" .. tostring(aSub) ..
+                          " id=" .. tostring(aID) ..
+                          " macroName=\"" .. tostring(macroName) .. "\"]")
+                    if macroName and macroName ~= "" and _GetMacroSpell then
+                        local ok, macroSID = pcall(_GetMacroSpell, macroName)
+                        print(P .. "    GetMacroSpell(\"" .. macroName ..
+                              "\") = " .. tostring(macroSID))
+                        if ok and macroSID == sid then
+                            return "macro via GetMacroSpell(name)"
+                        end
+                    end
+                    -- Pre-TWW numeric-index body parse (no subType, numeric id).
+                    if (not aSub) and aID and aID ~= 0 then
+                        local body = SafeGetBody(aID)
+                        if body and spellName then
+                            local wl = spellName:lower()
+                            for line in body:gmatch("[^\n]+") do
+                                local ca = line:match("^%s*/cast%s+(.+)") or
+                                           line:match("^%s*/use%s+(.+)")
+                                if ca then
+                                    local noC = ca:gsub("%b[]%s*", "")
+                                    for part in noC:gmatch("[^;]+") do
+                                        local t = part:match("^%s*(.-)%s*$")
+                                        if t then
+                                            if t:sub(1,1) == "!" then t = t:sub(2) end
+                                            if t:lower() == wl then
+                                                return "macro via body parse"
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    -- Last resort: icon texture.
+                    if scanIcon then
+                        local tex = GetActionTexture and GetActionTexture(slot)
+                        print(P .. "    tex=" .. tostring(tex) ..
+                              " wantIcon=" .. tostring(scanIcon))
+                        if tex and tex == scanIcon then
+                            return "macro via icon-texture fallback"
+                        end
+                    end
+                end
+                return nil
+            end
+
+            for key, state in pairs(JR.alerts or {}) do
+                local def = state.def
+                if def and def.category == "cooldown" and def.spellID then
+                    local sid = def.spellID
+                    local info = C_Spell.GetSpellInfo(sid)
+                    local spellName = info and info.name
+                    local scanIcon  = info and info.iconID
+                    print(P .. "---- " .. tostring(spellName) ..
+                          " (spellID " .. sid .. ") ----")
+
+                    local foundSlot, foundHow, foundKey = nil, nil, nil
+
+                    -- Mirror GetSpellKeybind: button frames first, then SLOT_RANGES.
+                    local function TrySlot(slot, cmd)
+                        if foundSlot then return end  -- already found
+                        local how = DebugCheckSlot(slot, cmd, sid, scanIcon, spellName)
+                        if how then
+                            local rawKey = GetBindingKey(cmd)
+                            local barNum = math.ceil(slot / 12)
+                            local btnNum = (slot - 1) % 12 + 1
+                            print(P .. "  Slot " .. slot ..
+                                  " (Bar" .. barNum .. " btn " .. btnNum ..
+                                  "): " .. how)
+                            print(P .. "    bindCmd=" .. tostring(cmd) ..
+                                  "  rawKey=" .. tostring(rawKey))
+                            foundSlot = slot
+                            foundHow  = how
+                            foundKey  = rawKey
+                        end
+                    end
+
+                    for _, prefix in ipairs(BLIZZARD_BAR_PREFIXES) do
+                        for btn = 1, 12 do
+                            local button = _G[prefix .. btn]
+                            if button then
+                                TrySlot(button.action, button.commandName)
+                            end
+                        end
+                    end
+                    if not foundSlot then
+                        for slot = 1, 156 do
+                            TrySlot(slot, SlotToBindingCmd(slot))
+                        end
+                    end
+
+                    if not foundSlot then
+                        print(P .. "  >> NOT FOUND on any action bar slot")
+                    else
+                        print(P .. "  >> Using slot " .. foundSlot ..
+                              " key=" .. tostring(foundKey))
+                    end
+                end
+            end
+            print(P .. "=== End of scan ===")
+
+        elseif sub == "slot" then
+            -- ── /jr debug slot ──────────────────────────────────────────────
+            -- Dump every non-empty slot in bars 1-156 with its action type,
+            -- ID, texture, binding command, current keybind, and macro details.
+            -- Slots where GetActionInfo returns nil but HasAction is true are
+            -- also printed (TWW edge-case macros that can't be resolved).
+            local P = "|cff88aaff[JR debug]|r "
+            print(P .. "=== Action bar slot dump (non-empty slots 1-156) ===")
+            for slot = 1, 156 do
+                -- Capture subType (3rd return, added in TWW 10.2).
+                local aType, aID, aSub = GetActionInfo(slot)
+                local hasAct = HasAction and HasAction(slot)
+                if aType or hasAct then
+                    local cmd = SlotToBindingCmd(slot)
+                    local key = cmd and GetBindingKey(cmd)
+                    local tex = GetActionTexture and GetActionTexture(slot)
+                    print(P .. "slot " .. slot ..
+                          ": type=" .. tostring(aType) ..
+                          " sub=" .. tostring(aSub) ..
+                          " id=" .. tostring(aID) ..
+                          " has=" .. tostring(hasAct) ..
+                          " tex=" .. tostring(tex) ..
+                          " bind=" .. tostring(cmd) ..
+                          " key=" .. tostring(key))
+                end
+            end
+            print(P .. "=== End slot dump ===")
+
+        elseif sub == "funcs" then
+            -- ── /jr debug funcs ─────────────────────────────────────────────
+            -- Report which legacy macro/action API globals exist in this build.
+            local P = "|cff88aaff[JR debug]|r "
+            print(P .. "=== Legacy API availability ===")
+            local funcs = {
+                "GetActionInfo", "GetBindingKey",
+                "GetMacroSpell", "GetMacroBody", "GetMacroInfo",
+            }
+            for _, fn in ipairs(funcs) do
+                print(P .. fn .. " = " .. type(_G[fn]))
+            end
+            print(P .. "C_Macro.GetMacroName = " ..
+                  type(C_Macro and C_Macro.GetMacroName))
+            print(P .. "_GetMacroSpell (cached) = " .. type(_GetMacroSpell))
+            print(P .. "_GetMacroBody  (cached) = " .. type(_GetMacroBody))
+            print(P .. "_GetMacroInfo  (cached) = " .. type(_GetMacroInfo))
+            print(P .. "=== End ===")
+
+        elseif sub == "probe" then
+            -- ── /jr debug probe ──────────────────────────────────────────────
+            -- Two-part diagnostic to locate a missing macro slot:
+            --   Part 1: Explicit dump of EVERY slot 1-40 (including empty ones)
+            --           — shows what GetActionInfo + HasAction + GetActionTexture
+            --             return for the range where bar 1-3 should live.
+            --   Part 2: Full scan 1-156, printing only slots with HasAction=true
+            --           but GetActionInfo returning nil (hidden macros).
+            local P = "|cff88aaff[JR debug]|r "
+            print(P .. "=== PROBE: explicit slots 1-40 ===")
+            for slot = 1, 40 do
+                local aType, aID, aSub = GetActionInfo(slot)
+                local has  = HasAction and HasAction(slot)
+                local tex  = GetActionTexture and GetActionTexture(slot)
+                print(P .. " [" .. slot .. "] type=" .. tostring(aType) ..
+                      " sub=" .. tostring(aSub) ..
+                      " id=" .. tostring(aID) ..
+                      " has=" .. tostring(has) ..
+                      " tex=" .. tostring(tex))
+            end
+            print(P .. "=== PROBE: HasAction=true but GetActionInfo=nil (slots 1-156) ===")
+            for slot = 1, 156 do
+                local aType = GetActionInfo(slot)
+                local has   = HasAction and HasAction(slot)
+                if has and not aType then
+                    local tex = GetActionTexture and GetActionTexture(slot)
+                    local cmd = SlotToBindingCmd(slot)
+                    local key = cmd and GetBindingKey(cmd)
+                    print(P .. " [" .. slot .. "] has=true type=nil " ..
+                          " tex=" .. tostring(tex) ..
+                          " bind=" .. tostring(cmd) ..
+                          " key=" .. tostring(key))
+                end
+            end
+            print(P .. "=== End probe ===")
+
+        else
+            local P = "|cff88aaff[JR debug]|r "
+            print(P .. "Debug sub-commands:")
+            print("  /jr debug keybinds  — scan registered alerts for keybinds")
+            print("  /jr debug slot      — dump all non-empty action bar slots")
+            print("  /jr debug funcs     — check which legacy API functions exist")
+            print("  /jr debug probe     — explicit slot-by-slot diagnosis (slots 1-40 + hidden macros)")
+        end
+
     else
-        print("|cff88aaff[Jouicy Reminders]|r Unknown command. Usage: /jr lock [cat] | /jr reset")
+        print("|cff88aaff[Jouicy Reminders]|r Unknown command. Usage: /jr lock [cat] | /jr reset | /jr debug")
     end
 end
