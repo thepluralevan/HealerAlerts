@@ -23,11 +23,13 @@ local ICON_CATEGORIES = { "cooldown", "upkeep", "rotational" }
 
 -- Default config for each anchor (x/y = BOTTOMLEFT offset from UIParent origin)
 local ANCHOR_DEFAULTS = {
-    cooldown   = { x = 400, y = 300, locked = false, iconSize = 48, growDirection = "RIGHT",
-                   showKeybinds = false, keybindFontSize = 12 },
-    upkeep     = { x = 400, y = 240, locked = false, iconSize = 48, growDirection = "RIGHT" },
-    rotational = { x = 600, y = 300, locked = false, iconSize = 48, growDirection = "RIGHT" },
-    text       = { x = 400, y = 180, locked = false },
+    cooldown   = { x = 400, y = 300, locked = false, hidden = false, iconSize = 48,
+                   growDirection = "RIGHT", showKeybinds = false, keybindFontSize = 12 },
+    upkeep     = { x = 400, y = 240, locked = false, hidden = false, iconSize = 48,
+                   growDirection = "RIGHT" },
+    rotational = { x = 600, y = 300, locked = false, hidden = false, iconSize = 48,
+                   growDirection = "RIGHT" },
+    text       = { x = 400, y = 180, locked = false, hidden = false },
 }
 
 -- Drag handle colors (r, g, b, a)
@@ -604,6 +606,29 @@ local function LayoutIconsForCategory(cat)
     local step   = size + 4
     local anchor = anchorFrames[cat]
 
+    -- ── Hidden module: collapse everything and bail out ──────────────────
+    if cfg.hidden then
+        anchor:Hide()
+        for key, state in pairs(JR.alerts) do
+            if state.def.category == cat and JR.iconFrames[key] then
+                JR.iconFrames[key]:Hide()
+            end
+        end
+        return
+    end
+
+    -- ── Module is visible: ensure anchor and all active icons are shown ──
+    -- This handles the case where the module was just un-hidden; active
+    -- alerts need to be re-shown because they were hidden by the block above.
+    anchor:Show()
+    for key, state in pairs(JR.alerts) do
+        if state.def.category == cat and JR.iconFrames[key] then
+            if state.active and AlertCfg(key).enabled ~= false then
+                JR.iconFrames[key]:Show()
+            end
+        end
+    end
+
     local ordered = {}
     for key, state in pairs(JR.alerts) do
         if state.def.category == cat and JR.iconFrames[key] and state.active then
@@ -641,6 +666,14 @@ end
 
 local TEXT_LINE_H = 22
 local function LayoutTexts()
+    -- When the text module is hidden, hide everything and bail out.
+    if AnchorCfg("text").hidden then
+        anchorFrames["text"]:Hide()
+        for _, fs in pairs(JR.textFrames) do fs:Hide() end
+        return
+    end
+    anchorFrames["text"]:Show()
+
     -- Collect active alerts from all categories that have displayable text.
     -- Text resolution: user cfg.text > def.defaultText > category template.
     local active = {}
@@ -687,6 +720,9 @@ local function ApplyLockStateForCategory(cat)
     local cfg    = AnchorCfg(cat)
     local locked = cfg.locked
     local anchor = anchorFrames[cat]
+
+    -- Hidden modules have no visible anchor — nothing to lock/unlock.
+    if cfg.hidden then return end
 
     if cat ~= "text" then
         -- Resize anchor to cover the actual current icon bar
@@ -772,8 +808,11 @@ local function ActivateAlert(key, auraData)
 
     local btn = JR.iconFrames[key]
     if btn then
-        btn:Show()
-        ApplyGlow(btn, cfg.glowType or state.def.defaultGlow or "none")
+        -- Don't surface the icon if its module is currently hidden.
+        if not AnchorCfg(state.def.category or "cooldown").hidden then
+            btn:Show()
+            ApplyGlow(btn, cfg.glowType or state.def.defaultGlow or "none")
+        end
     end
 
     TryPlaySound(key)

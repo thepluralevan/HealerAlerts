@@ -207,6 +207,10 @@ local function BuildContent(sc)
         Label(sc, y, CAT_LABELS[cat], COL_L, { 1, 1, 1 })
         y = y + 22
 
+        y = Checkbox(sc, y, "Hide this module",
+            function() return ACfg(cat).hidden == true end,
+            function(v) ACfg(cat).hidden = v end)
+
         if cat ~= "text" then
             y = Slider(sc, y, "Icon size",
                 24, 72, 2,
